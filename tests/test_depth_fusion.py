@@ -54,8 +54,13 @@ def test_multi_frame_ema_smooths_jumps():
 
 
 def test_inverse_depth_weight_handles_zero_safely():
-    """Points with depth at MIN_DEPTH floor should still produce a finite scale."""
-    a = np.array([MIN_DEPTH, 1.0, 2.0, 5.0])
+    """Points slightly above MIN_DEPTH floor should still produce a finite scale.
+
+    Note: under the validity-mask contract (a > MIN_DEPTH), points exactly at
+    the floor are excluded. We use MIN_DEPTH * 2 here to test the boundary case
+    where the smallest valid depth is just above the floor.
+    """
+    a = np.array([MIN_DEPTH * 2, 1.0, 2.0, 5.0])
     s_true = 0.5
     b = s_true * a
     s = per_frame_scale_ls(a, b)
@@ -90,3 +95,42 @@ def test_ema_first_frame_no_smoothing():
     b = np.array([[0.7, 0.7, 0.7]])
     s = fuse_metric_scale(a, b, momentum=0.99)
     assert abs(s[0] - 0.7) < 1e-9
+
+
+def test_negative_pi3x_excluded_from_estimate():
+    """Negative or sub-MIN_DEPTH Pi3X values must not contaminate the LS result."""
+    a = np.array([-0.5, 0.0, 1e-5, 1.0, 2.0, 3.0])    # first 3 invalid
+    b = 0.5 * np.abs(a) + 1e-9                         # avoid exact zero in b
+    s = per_frame_scale_ls(a, b)
+    # Should equal LS on the last 3 points which all give s=0.5
+    assert abs(s - 0.5) < 1e-6
+
+
+def test_all_masked_returns_nan_for_single_frame():
+    a = np.array([1.0, 2.0, 3.0])
+    b = np.array([0.5, 1.0, 1.5])
+    mask = np.zeros(3, dtype=bool)
+    s = per_frame_scale_ls(a, b, valid_mask=mask)
+    assert np.isnan(s)
+
+
+def test_degenerate_frame_carries_forward_prev_scale():
+    """A NaN frame in the middle should carry forward the previous scale,
+    not reset it to 0 and pollute subsequent EMA states."""
+    T, N = 4, 100
+    rng = np.random.default_rng(7)
+    a = rng.uniform(0.5, 5.0, size=(T, N))
+    b = 0.8 * a
+    mask = np.ones((T, N), dtype=bool)
+    mask[2, :] = False                  # frame 2 fully masked out
+    s = fuse_metric_scale(a, b, valid_mask=mask, momentum=0.99)
+    assert np.isfinite(s).all()
+    assert abs(s[3] - s[1]) < 0.05      # frame 3 should NOT be dragged toward 0
+
+
+def test_first_frame_degenerate_returns_nan():
+    a = np.array([[1.0, 2.0]])
+    b = np.array([[0.5, 1.0]])
+    mask = np.zeros((1, 2), dtype=bool)
+    s = fuse_metric_scale(a, b, valid_mask=mask, momentum=0.99)
+    assert s.shape == (1,) and np.isnan(s[0])

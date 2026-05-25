@@ -1,0 +1,69 @@
+# Sources for SANA-WM annotation pipeline (paper §4, Table 1)
+# Total target after filtering: 212,975 clips
+sources:
+  spatialvid_hq:
+    citation: "[87]"
+    type: huggingface_gated
+    repo_id: NJU-PCALab/SpatialVID-HQ      # placeholder; verify upon download
+    pose_mode: default                      # VIPE + Pi3X/MoGe-2
+    nominal_duration_s: 10
+    real_or_synthetic: real
+    target_clips: 158369
+
+  dl3dv_real:
+    citation: "[86]"
+    type: dl3dv_official
+    pose_mode: gt_pose                      # GT pose + Pi3X
+    nominal_duration_s: 10
+    real_or_synthetic: real
+    target_clips: 5691
+
+  dl3dv_gs_refined:
+    citation: "[86]+[94]+[95]"
+    type: derived_from_dl3dv                # produced by Stage-03 3DGS augmentation
+    pose_mode: gt_pose
+    nominal_duration_s: 60
+    real_or_synthetic: synthetic
+    target_clips: 14881
+
+  omniworld:
+    citation: "[89]"
+    type: huggingface
+    repo_id: yyfz233/OmniWorld              # placeholder; verify
+    pose_mode: gt_depth                     # VIPE + GT depth, MoGe-2 for metric scale
+    nominal_duration_s: 60
+    real_or_synthetic: synthetic
+    target_clips: 1720
+
+  sekai_game:
+    citation: "[90]"
+    type: huggingface
+    repo_id: Lixsp11/sekai                  # placeholder; verify subset path
+    subset: game
+    pose_mode: gt_pose
+    nominal_duration_s: 60
+    real_or_synthetic: synthetic
+    target_clips: 3560
+
+  sekai_walking_hq:
+    citation: "[90]"
+    type: huggingface
+    repo_id: Lixsp11/sekai                  # placeholder; verify subset path
+    subset: walking_hq
+    pose_mode: default
+    nominal_duration_s: 60
+    real_or_synthetic: real
+    target_clips: 9767
+
+  miradata:
+    citation: "[88]"
+    type: project_release
+    repo: TencentARC/MiraData
+    pose_mode: default
+    nominal_duration_s: 60
+    real_or_synthetic: real
+    target_clips: 18987
+
+# All counts trace to paper Table 1 (§4); sum should equal 212975
+totals:
+  total_clips: 212975

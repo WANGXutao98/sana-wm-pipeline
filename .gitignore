@@ -61,3 +61,6 @@ data/
 # mypy / ruff
 .mypy_cache/
 .ruff_cache/
+
+# Project-local ffmpeg/ffprobe symlinks (host-specific)
+.bin/

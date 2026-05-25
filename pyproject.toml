@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sana-wm-pipeline"
+version = "0.1.0"
+description = "SANA-WM (arXiv:2605.15178) data annotation pipeline reproduction"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.4",
+  "torchvision",
+  "numpy",
+  "scipy",
+  "opencv-python-headless",
+  "ffmpeg-python",
+  "scenedetect[opencv]",
+  "pyyaml",
+  "tqdm",
+  "rich",
+  "webdataset>=0.2.86",
+  "pandas",
+  "pyarrow",
+  "ray[default]>=2.30",
+  "transformers>=4.45",
+  "einops",
+  "av",
+  "huggingface-hub",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-xdist", "ruff", "mypy"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

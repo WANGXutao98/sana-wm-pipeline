@@ -1,0 +1,44 @@
+# All numeric values trace to specific paper passages — DO NOT change without re-reading paper.
+target:
+  resolution: [1280, 720]      # §5.1, App. D.1
+  fps: 16                       # §5.1, App. D.1
+  duration_s: 60                # §5.1
+  raw_frames: 960               # App. D.1: "960 video frames"
+  camera_frames: 961            # App. D.1: "961 SANA-WM camera frames"
+  short_clip_duration_s: 10     # SpatialVID-HQ / DL3DV real clips
+  raw_per_latent: 8             # §3.3 fine branch: "eight raw frames per VAE temporal stride"
+  vae_channels: 128             # §5.1: "LTX2 VAE uses C=128 latent channels"
+
+paths:
+  raw_root: /mnt/afs/davidwang/workspace/data/sana_wm/raw
+  staging: /mnt/afs/davidwang/workspace/data/sana_wm/staging
+  out_root: /mnt/afs/davidwang/workspace/data/sana_wm/shards
+
+depth_fusion:
+  weights: inverse_depth        # App. B.1: "inverse-depth weights w_i = 1/d_i"
+  ema_momentum: 0.99            # App. B.1: "exponential moving average (momentum 0.99)"
+
+umeyama:
+  inlier_percentile: 80         # App. B.1: "80th-percentile inlier filtering"
+
+camera_quality:                 # App. B.3 uniform filters
+  fov_deg_min: 25
+  fov_deg_max: 120
+  focal_divergence_max: 0.20
+  scale_cv_max: 2.0
+
+unimatch:
+  sample_every_s: 0.5           # App. B.3: "every 0.5s"
+  window_s: 60                  # App. B.3: "across the first 60s"
+
+dover:
+  chunk_s: 5                    # App. B.3: "averaged over non-overlapping 5s chunks"
+
+difix3d:                        # App. B.2: exact values
+  num_steps: 1
+  prompt: "remove degradation"
+  timestep: 199
+  guidance: 0.0
+
+shards:
+  samples_per_shard: 1000

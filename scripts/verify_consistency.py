@@ -29,55 +29,18 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from sana_wm_pipeline.stage02_pose.pose_quality import evaluate_pose_quality
+from sana_wm_pipeline.stage05_caption.postprocess import (
+    FORBIDDEN_VERBS,
+    find_camera_verbs,
+)
 from sana_wm_pipeline.stage06_pack.schema import (
     CAMERA_FRAMES, EXPECTED_WH, INTRINSICS_VIEWS, INTRINSICS_DIM,
 )
 
-# Forbidden camera-action verbs (paper §4: caption must not mention camera actions)
-FORBIDDEN_VERBS = (
-    "pan", "tilt", "zoom", "dolly", "truck", "crab", "crane",
-    "fly-through", "flythrough", "walk", "walking", "rotate", "spin",
-    "orbit", "approach", "retreat",
-)
-
-
-def _verb_pattern(verb: str) -> str:
-    """Build a regex pattern that matches a verb stem + common inflections.
-
-    Examples:
-      pan   -> pan, pans, panning, panned (but not panel/panic)
-      rotate -> rotate, rotates, rotating, rotated
-      walk   -> walk, walks, walking, walked
-      fly-through / flythrough -> exact hyphenated form
-
-    We avoid `\\w*` greediness (which would catch panel/spinach) by enumerating
-    the common English verb suffixes explicitly.
-    """
-    import re
-    if "-" in verb or verb == "flythrough":
-        # multi-token forms must match exactly with optional plural 's'
-        return rf"\b{re.escape(verb)}s?\b"
-    # Verbs ending in 'e' drop the e before -ing/-ed: rotate -> rotating
-    if verb.endswith("e"):
-        stem = verb[:-1]
-        # Match: rotate, rotates, rotated, rotating
-        return rf"\b(?:{re.escape(verb)}(?:s|d)?|{re.escape(stem)}ing)\b"
-    # Generic: pan, pans, panned, panning  (consonant doubling handled by [a-z]?)
-    return rf"\b{re.escape(verb)}(?:s|ed|n?ing|n?ed)?\b"
-
 
 def caption_has_forbidden_verbs(caption: str) -> tuple[bool, list[str]]:
-    """Return (has_any, list_of_hits). Token-boundary + inflection-aware,
-    case-insensitive."""
-    import re
-    hits: list[str] = []
-    low = caption.lower()
-    for v in FORBIDDEN_VERBS:
-        if re.search(_verb_pattern(v), low):
-            hits.append(v)
-    # Common camera phrases
-    if re.search(r"\bthe camera\b", low) or re.search(r"\bfirst[- ]person view (going|walking|moving)\b", low):
-        hits.append("camera-phrase")
+    """Return (has_any, list_of_hits) — thin alias over stage05_caption.postprocess."""
+    hits = find_camera_verbs(caption)
     return (len(hits) > 0, hits)
 
 

@@ -1,0 +1,72 @@
+# SANA-WM paper Table 6 — per-source visual / VLM thresholds.
+# Source order and ranges are a verbatim transcription of arXiv:2605.15178v1
+# Table 6.  "null" means the filter is NOT applied for that source ("—" in paper).
+#
+# Range convention:
+#   [lo, hi]        — value must satisfy  lo <= v <= hi
+#   scene_cuts_max  — integer ceiling (v must be <= max)
+#
+# Camera filters (FOV / focal divergence / scale CV) are uniform across all
+# sources per App. B.3 and live in configs/pipeline.yaml + pose_quality.py;
+# they are NOT duplicated here.
+
+per_source:
+  OmniWorld:
+    vmaf_motion:      [0.5, 100]
+    unimatch_flow:    [3, 100]
+    dover:            [0.35, 1.0]
+    color_saturation: null
+    scene_cuts_max:   null
+    vlm_entity:       [0, 10]
+    vlm_quality:      [0.5, 1.5]
+
+  Sekai_Game:
+    vmaf_motion:      [0.5, 50]
+    unimatch_flow:    [3, 80]
+    dover:            [0.25, 1.0]
+    color_saturation: null
+    scene_cuts_max:   null
+    vlm_entity:       [0, 10]
+    vlm_quality:      [0.5, 1.5]
+
+  Sekai_Walking:
+    vmaf_motion:      [0.5, 50]
+    unimatch_flow:    [3, 50]
+    dover:            [0.35, 1.0]
+    color_saturation: [0, 180]
+    scene_cuts_max:   null
+    vlm_entity:       [0, 25]
+    vlm_quality:      [0.5, 1.5]
+
+  MiraData:
+    vmaf_motion:      [0.5, 50]
+    unimatch_flow:    [3, 80]
+    dover:            [0.4, 1.0]
+    color_saturation: [0, 180]
+    scene_cuts_max:   1
+    vlm_entity:       null
+    vlm_quality:      null
+
+  DL3DV_GS:
+    vmaf_motion:      [6, 50]
+    unimatch_flow:    [3, 80]
+    dover:            [0.4, 1.0]
+    color_saturation: [0, 180]
+    scene_cuts_max:   1
+    vlm_entity:       null
+    vlm_quality:      null
+
+  SpatialVID:
+    vmaf_motion:      [0.5, 50]
+    unimatch_flow:    [3, 80]
+    dover:            [0.35, 1.0]
+    color_saturation: [0, 180]
+    scene_cuts_max:   null
+    vlm_entity:       [0, 10]
+    vlm_quality:      [0.5, 1.5]
+
+# Uniform camera filters live elsewhere; documented here for cross-reference.
+camera:
+  fov_deg:          [25, 120]
+  focal_div_max:    0.20
+  scale_cv_max:     2.0

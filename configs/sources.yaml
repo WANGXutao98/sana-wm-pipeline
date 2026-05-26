@@ -4,7 +4,9 @@ sources:
   spatialvid_hq:
     citation: "[87]"
     type: huggingface_gated
-    repo_id: NJU-PCALab/SpatialVID-HQ      # placeholder; verify upon download
+    repo_id: SpatialVID/SpatialVID-HQ       # verified 2026-05-26 (NJU-3DV, CVPR 2026)
+    project_url: https://github.com/NJU-3DV/SpatialVID
+    license: CC-BY-NC-SA-4.0
     pose_mode: default                      # VIPE + Pi3X/MoGe-2
     nominal_duration_s: 10
     real_or_synthetic: real
@@ -12,7 +14,10 @@ sources:
 
   dl3dv_real:
     citation: "[86]"
-    type: dl3dv_official
+    type: dl3dv_official                    # use scripts/download.py from github.com/DL3DV-10K/Dataset
+    project_url: https://github.com/DL3DV-10K/Dataset
+    hf_960p_mirror: DL3DV/DL3DV-ALL-960P
+    license: DL3DV-custom-terms
     pose_mode: gt_pose                      # GT pose + Pi3X
     nominal_duration_s: 10
     real_or_synthetic: real
@@ -20,7 +25,7 @@ sources:
 
   dl3dv_gs_refined:
     citation: "[86]+[94]+[95]"
-    type: derived_from_dl3dv                # produced by Stage-03 3DGS augmentation
+    type: derived_from_dl3dv                # produced by Stage-03 3DGS augmentation; no separate download
     pose_mode: gt_pose
     nominal_duration_s: 60
     real_or_synthetic: synthetic
@@ -29,7 +34,10 @@ sources:
   omniworld:
     citation: "[89]"
     type: huggingface
-    repo_id: yyfz233/OmniWorld              # placeholder; verify
+    repo_id: InternRobotics/OmniWorld       # verified 2026-05-26 (ICLR 2026)
+    project_url: https://github.com/yangzhou24/OmniWorld
+    subset_hint: "OmniWorld-Game"           # paper uses Game subset (synthetic 720p)
+    license: CC-BY-NC-SA-4.0
     pose_mode: gt_depth                     # VIPE + GT depth, MoGe-2 for metric scale
     nominal_duration_s: 60
     real_or_synthetic: synthetic
@@ -38,8 +46,10 @@ sources:
   sekai_game:
     citation: "[90]"
     type: huggingface
-    repo_id: Lixsp11/sekai                  # placeholder; verify subset path
-    subset: game
+    repo_id: Lixsp11/Sekai-Project          # verified 2026-05-26 (NeurIPS 2025)
+    project_url: https://github.com/Lixsp11/sekai-codebase
+    subset_files: ["sekai-game-walking.zip.part_aa", "sekai-game-walking.zip.part_ab"]
+    license: project-specific
     pose_mode: gt_pose
     nominal_duration_s: 60
     real_or_synthetic: synthetic
@@ -48,8 +58,10 @@ sources:
   sekai_walking_hq:
     citation: "[90]"
     type: huggingface
-    repo_id: Lixsp11/sekai                  # placeholder; verify subset path
-    subset: walking_hq
+    repo_id: Lixsp11/Sekai-Project          # verified 2026-05-26
+    project_url: https://github.com/Lixsp11/sekai-codebase
+    subset_hint: "sekai-real-walking-hq"
+    license: project-specific
     pose_mode: default
     nominal_duration_s: 60
     real_or_synthetic: real
@@ -57,8 +69,10 @@ sources:
 
   miradata:
     citation: "[88]"
-    type: project_release
-    repo: TencentARC/MiraData
+    type: project_release                   # only meta CSV on HF; videos downloaded by URL via mira-space/MiraData scripts
+    repo_id: TencentARC/MiraData            # verified 2026-05-26
+    project_url: https://github.com/mira-space/MiraData
+    license: GPL-3.0                        # repo license; video hosts have their own terms
     pose_mode: default
     nominal_duration_s: 60
     real_or_synthetic: real

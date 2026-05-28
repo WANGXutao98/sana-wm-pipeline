@@ -1,101 +1,175 @@
-"""VIPE patch — replace the default depth back-end with our Pi3X + MoGe-2 fusion.
+"""VIPE-compatible depth backend: Pi3X (consistent) + MoGe-2 (metric scale).
 
-Paper App. B.1 protocol (per clip):
-  1. Pi3X infers (T,H,W) long-sequence-consistent depth + 3D structure.
+Paper App. B.1 protocol:
+  1. Pi3X infers (T,H,W) long-sequence-consistent relative depth.
   2. MoGe-2 infers (T,H,W) per-frame metric depth.
-  3. SLAM tracks (track_id -> (frame, (u, v))) are read from VIPE's front-end.
-  4. fuse_metric_scale (App. B.1 closed-form + EMA momentum 0.99) returns
-     per-frame scale `s_t`.
-  5. The patched back-end returns `s_t * d_pi3x` as the "metric depth" fed
-     into the rest of VIPE (BA + global pose graph).
+  3. EMA-momentum-0.99 closed-form scale fusion (App. B.1) gives per-frame
+     scale s_t that converts Pi3X depth to metric.
 
-This file is copied into `third_party/vipe/vipe/backends/` by the setup
-script — it cannot live inside the upstream tree without our edits.
+Integration: drop into vipe/priors/depth/ and register in vipe/priors/depth/__init__.py
+as make_depth_model("pi3x_moge2") -> Pi3XMoGe2DepthModel().
+
+Install prerequisites:
+  pip install git+https://github.com/yyfz/Pi3.git   # Pi3X code
+  hf download yyfz233/Pi3X --local-dir <weights>    # Pi3X weights
+  pip install git+https://github.com/microsoft/MoGe.git  # MoGe code
+  hf download Ruicheng/moge-2-vitl-normal --local-dir <weights>  # MoGe-2 weights
 """
 from __future__ import annotations
 
-from typing import List, Tuple
+import os
+from typing import Optional
 
 import numpy as np
 import torch
 
-from sana_wm_pipeline.stage02_pose.depth_fusion import fuse_metric_scale
+from vipe.utils.misc import unpack_optional
+
+from .base import DepthEstimationInput, DepthEstimationModel, DepthEstimationResult, DepthType
 
 
-GRID_SAMPLE_SIZE = 16     # per-frame fallback grid when tracks are sparse.
-MIN_TRACKS_PER_FRAME = 16
+def _fuse_ema(d_consistent: np.ndarray, d_metric: np.ndarray,
+              momentum: float = 0.99) -> np.ndarray:
+    """Closed-form EMA scale fusion (App. B.1).
+
+    s_t = Σ(w · a · b) / Σ(w · a²),  w = 1/a  (inverse-depth weighting)
+    where a = d_consistent[t], b = d_metric[t].
+    """
+    T = d_consistent.shape[0]
+    scale = np.ones(T, dtype=np.float32)
+    ema_s = None
+    for t in range(T):
+        a = d_consistent[t].flatten().astype(np.float64)
+        b = d_metric[t].flatten().astype(np.float64)
+        valid = (a > 1e-6) & (b > 1e-6) & np.isfinite(a) & np.isfinite(b)
+        if valid.sum() < 16:
+            s_t = ema_s if ema_s is not None else 1.0
+        else:
+            av, bv = a[valid], b[valid]
+            w = 1.0 / np.clip(av, 1e-6, None)
+            s_t = float(np.sum(w * av * bv) / np.sum(w * av * av))
+        ema_s = s_t if ema_s is None else momentum * ema_s + (1 - momentum) * s_t
+        scale[t] = float(ema_s)
+    return scale
 
 
-class Pi3XMoGe2Depth:
-    """VIPE-compatible depth back-end wrapper around Pi3X + MoGe-2."""
+class Pi3XMoGe2DepthModel(DepthEstimationModel):
+    """Pi3X + MoGe-2 fused depth for SANA-WM (App. B.1).
 
-    def __init__(self, pi3x_model, moge2_model, device: str = "cuda",
-                 ema_momentum: float = 0.99):
-        self.pi3x = pi3x_model
-        self.moge2 = moge2_model
+    Environment variables:
+      SANA_WM_PI3X_WEIGHTS  — path to yyfz233/Pi3X local_dir (required)
+      SANA_WM_MOGE2_WEIGHTS — path to Ruicheng/moge-2-vitl-normal local_dir (required)
+    """
+
+    def __init__(self, device: str = "cuda", ema_momentum: float = 0.99) -> None:
+        super().__init__()
         self.device = device
         self.ema_momentum = ema_momentum
+        self._pi3x: Optional[object] = None
+        self._moge2: Optional[object] = None
+        self._video_buffer: list[np.ndarray] = []
 
-    @torch.no_grad()
-    def __call__(self, frames_thwc: np.ndarray,
-                 slam_tracks: List[dict]) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute metric depth + per-frame scale.
+    def _lazy_load(self) -> None:
+        if self._pi3x is not None:
+            return
 
-        Args:
-          frames_thwc: (T,H,W,3) uint8 RGB.
-          slam_tracks: list of dicts with keys {track_id, frame_id, uv}.
+        pi3x_weights = os.environ.get("SANA_WM_PI3X_WEIGHTS")
+        moge2_weights = os.environ.get("SANA_WM_MOGE2_WEIGHTS")
 
-        Returns:
-          metric_depth: (T,H,W) float32, == Pi3X depth * per-frame scale.
-          scale_per_frame: (T,) float32.
-        """
-        d_pi3x = self.pi3x.infer_video(frames_thwc).astype(np.float32)
-        d_moge = self.moge2.infer_video(frames_thwc).astype(np.float32)
-        T, H, W = d_pi3x.shape
-        if d_moge.shape != (T, H, W):
-            raise ValueError(
-                f"Pi3X/MoGe-2 shape mismatch: {d_pi3x.shape} vs {d_moge.shape}"
+        if pi3x_weights is None or moge2_weights is None:
+            raise RuntimeError(
+                "Set SANA_WM_PI3X_WEIGHTS and SANA_WM_MOGE2_WEIGHTS env vars "
+                "to the local weight directories before using Pi3XMoGe2DepthModel."
             )
 
-        pi3x_pts, moge_pts = self._gather_paired_depths(d_pi3x, d_moge, slam_tracks)
-        scale = fuse_metric_scale(pi3x_pts, moge_pts, momentum=self.ema_momentum)
-        metric = d_pi3x * scale[:, None, None]
-        return metric.astype(np.float32), scale.astype(np.float32)
+        try:
+            from pi3 import Pi3  # type: ignore
+            self._pi3x = Pi3.from_pretrained(pi3x_weights).to(self.device).eval()
+        except ImportError as e:
+            raise RuntimeError(
+                "Pi3X (pip install git+https://github.com/yyfz/Pi3.git) not found."
+            ) from e
 
-    @staticmethod
-    def _gather_paired_depths(
-        d_pi3x: np.ndarray, d_moge: np.ndarray, slam_tracks: List[dict],
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Return (T, K) arrays of paired Pi3X / MoGe-2 depths.
+        try:
+            from moge.model import MoGeModel  # type: ignore
+            self._moge2 = MoGeModel.from_pretrained(moge2_weights).to(self.device).eval()
+        except ImportError as e:
+            raise RuntimeError(
+                "MoGe (pip install git+https://github.com/microsoft/MoGe.git) not found."
+            ) from e
 
-        Pads with NaN so `fuse_metric_scale`'s validity filter excludes them.
+    @property
+    def depth_type(self) -> DepthType:
+        return DepthType.METRIC_DEPTH
+
+    def estimate(self, src: DepthEstimationInput) -> DepthEstimationResult:
+        """Process a single frame (VIPE calls this per-frame during SLAM).
+
+        Pi3X requires the full video context for sequence-consistent depth.
+        We buffer all frames and run Pi3X in batch on the first call after the
+        video is complete (video_frame_list is not None).
+
+        For per-frame SLAM keyframe calls (rgb only), we fall back to MoGe-2
+        metric depth directly (Pi3X sequence context not available yet).
         """
-        T, H, W = d_pi3x.shape
-        # group tracks by frame
-        by_frame: dict[int, List[Tuple[int, int]]] = {}
-        for tr in slam_tracks:
-            t = int(tr["frame_id"])
-            u, v = tr["uv"]
-            by_frame.setdefault(t, []).append((int(round(v)), int(round(u))))
+        self._lazy_load()
 
-        pi3x_rows: List[np.ndarray] = []
-        moge_rows: List[np.ndarray] = []
-        for t in range(T):
-            pts = by_frame.get(t, [])
-            if len(pts) >= MIN_TRACKS_PER_FRAME:
-                ys = np.array([p[0] for p in pts], dtype=int).clip(0, H - 1)
-                xs = np.array([p[1] for p in pts], dtype=int).clip(0, W - 1)
-                pi3x_rows.append(d_pi3x[t, ys, xs])
-                moge_rows.append(d_moge[t, ys, xs])
-            else:
-                ys = np.linspace(0, H - 1, GRID_SAMPLE_SIZE).astype(int)
-                xs = np.linspace(0, W - 1, GRID_SAMPLE_SIZE).astype(int)
-                yy, xx = np.meshgrid(ys, xs, indexing="ij")
-                pi3x_rows.append(d_pi3x[t, yy, xx].flatten())
-                moge_rows.append(d_moge[t, yy, xx].flatten())
-        max_n = max(len(r) for r in pi3x_rows)
-        pad = lambda a: np.pad(a, (0, max_n - len(a)), constant_values=np.nan)
-        return (
-            np.stack([pad(r) for r in pi3x_rows]).astype(np.float32),
-            np.stack([pad(r) for r in moge_rows]).astype(np.float32),
+        # Video-sequence mode (post-SLAM depth alignment): process full clip.
+        if src.video_frame_list is not None:
+            return self._estimate_video(src)
+
+        # Per-frame mode (SLAM keyframe): use MoGe-2 only.
+        return self._estimate_single(src)
+
+    @torch.no_grad()
+    def _estimate_single(self, src: DepthEstimationInput) -> DepthEstimationResult:
+        rgb = unpack_optional(src.rgb).to(self.device)
+        if rgb.dim() == 3:
+            rgb = rgb[None]
+        # MoGe-2 inference
+        inp = rgb.permute(0, 3, 1, 2)  # (1,3,H,W)
+        fov_x = None
+        if src.intrinsics is not None:
+            fx = src.intrinsics[0].item()
+            w = rgb.shape[2]
+            import math
+            fov_x = math.degrees(2 * math.atan(w / (2 * fx)))
+        out = self._moge2.infer(inp, fov_x=fov_x)  # type: ignore[union-attr]
+        depth = out["depth"].squeeze(0)  # (H,W)
+        return DepthEstimationResult(metric_depth=depth)
+
+    @torch.no_grad()
+    def _estimate_video(self, src: DepthEstimationInput) -> DepthEstimationResult:
+        """Run Pi3X (full sequence) + MoGe-2 (per-frame) and fuse."""
+        frames = src.video_frame_list  # list of (H,W,3) float32 [0,1]
+        assert frames is not None
+        T = len(frames)
+
+        # Pi3X: batch (T, H, W, 3) -> consistent depth (T, H, W)
+        frames_np = np.stack(frames, axis=0)  # (T,H,W,3)
+        frames_t = torch.from_numpy(frames_np).to(self.device).permute(0, 3, 1, 2)  # (T,3,H,W)
+        pi3x_out = self._pi3x.infer(frames_t)  # type: ignore[union-attr]
+        d_pi3x = pi3x_out["depth"].cpu().numpy()  # (T,H,W)
+
+        # MoGe-2: per-frame metric depth
+        fov_x = None
+        if src.intrinsics is not None:
+            fx = src.intrinsics[0].item()
+            w = frames_np.shape[2]
+            import math
+            fov_x = math.degrees(2 * math.atan(w / (2 * fx)))
+
+        d_moge_list = []
+        for i in range(T):
+            f = frames_t[i:i+1]
+            out = self._moge2.infer(f, fov_x=fov_x)  # type: ignore[union-attr]
+            d_moge_list.append(out["depth"].squeeze(0).cpu().numpy())
+        d_moge = np.stack(d_moge_list, axis=0)  # (T,H,W)
+
+        # EMA scale fusion
+        scale = _fuse_ema(d_pi3x, d_moge, self.ema_momentum)  # (T,)
+        metric_depth = d_pi3x * scale[:, None, None]
+
+        return DepthEstimationResult(
+            metric_depth=torch.from_numpy(metric_depth.astype(np.float32)).to(self.device)
         )

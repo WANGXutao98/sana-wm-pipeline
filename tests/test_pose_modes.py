@@ -30,23 +30,30 @@ def _eye_poses(t: int = T) -> np.ndarray:
 
 # ---- Default mode ----------------------------------------------------------
 def test_default_mode_loads_artifact(monkeypatch, tmp_path: Path):
-    pose_json = tmp_path / "pose.json"
-    depth_npy = tmp_path / "depth.npy"
-    scale_npy = tmp_path / "scale.npy"
+    """VIPE now writes npz artifacts under pose/ and intrinsics/ subdirs."""
+    T_frames = T
+    poses = _eye_poses(T_frames)  # (T, 4, 4)
+    intr_raw = np.tile(
+        np.array([700.0, 700.0, 640.0, 360.0], dtype=np.float32), (T_frames, 1)
+    )  # (T, 4)
 
     def fake_call(cmd: Sequence[str], **kw):
-        # Find --out arg and write outputs adjacent to it.
+        # vipe infer <clip> --output <work_dir> --pipeline <name>
         cmd = list(cmd)
-        out_idx = cmd.index("--out") + 1
-        outp = Path(cmd[out_idx])
-        outp.write_text(json.dumps({
-            "poses_c2w": _eye_poses().tolist(),
-            "intrinsics_per_frame_NVD": _ok_intrinsics().tolist(),
-        }))
-        depth_idx = cmd.index("--out-depth") + 1
-        scale_idx = cmd.index("--out-scale") + 1
-        np.save(Path(cmd[depth_idx]), np.ones((T, 720, 1280), dtype=np.float32))
-        np.save(Path(cmd[scale_idx]), np.ones(T, dtype=np.float32))
+        out_idx = cmd.index("--output") + 1
+        work_dir = Path(cmd[out_idx])
+        stem = "clip"   # clip_path.stem = "clip"
+
+        # Write VIPE's pose/ and intrinsics/ artifacts.
+        pose_dir = work_dir / "pose"
+        pose_dir.mkdir(parents=True, exist_ok=True)
+        np.savez(pose_dir / f"{stem}.npz",
+                 data=poses, inds=np.arange(T_frames))
+
+        intr_dir = work_dir / "intrinsics"
+        intr_dir.mkdir(parents=True, exist_ok=True)
+        np.savez(intr_dir / f"{stem}.npz",
+                 data=intr_raw, inds=np.arange(T_frames))
 
     monkeypatch.setattr(
         "sana_wm_pipeline.stage02_pose.mode_default.subprocess.check_call",
@@ -55,8 +62,10 @@ def test_default_mode_loads_artifact(monkeypatch, tmp_path: Path):
     art = mode_default.run_default(Path("clip.mp4"), tmp_path)
     art.validate(T)
     assert isinstance(art, PoseArtifact)
-    assert art.depth_downsampled is not None
-    assert art.depth_downsampled.shape == (T, 180, 320)
+    # intrinsics must be (T, 1, 4)
+    assert art.intrinsics.shape == (T, 1, 4)
+    # scale_per_frame ones when no Pi3X
+    assert art.scale_per_frame.shape == (T,)
 
 
 # ---- GT-depth mode ---------------------------------------------------------

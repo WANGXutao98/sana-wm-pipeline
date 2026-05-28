@@ -27,7 +27,7 @@
 |---|---|---|---|
 | **VIPE** | SLAM + BA 引擎（patch 本仓 stage02） | Apache-2.0 | `nv-tlabs/vipe` |
 | **Pi3X** | 长序列一致深度 | BSD-3 + 权重 CC-BY-NC-4.0 | `yyfz/Pi3` + `yyfz233/Pi3X` (HF) |
-| **MoGe-2** | per-frame metric depth | MIT（按 model card） | `microsoft/MoGe` |
+| **MoGe-2** | per-frame metric depth | MIT | `Ruicheng/moge-2-vitl-normal` |
 | **UniMatch** | optical flow（视觉过滤） | MIT-ish | `autonomousvision/unimatch` |
 | **DOVER** | 视频质量评分 | Apache-2.0 | `VQAssessment/DOVER` |
 | **FCGS** | 3DGS 快速拟合（DL3DV-GS） | 研究代码 | `YihangChen-ee/FCGS` |
@@ -256,9 +256,9 @@ bash scripts/00_setup_vipe.sh
 # E.2 Pi3X 权重（CC-BY-NC-4.0 非商用）
 huggingface-cli download yyfz233/Pi3X --local-dir /filestorage/davidwang/models/pi3x
 
-# E.3 MoGe-2
+# E.3 MoGe-2（verified 2026-05-28：正确 repo 为 Ruicheng/moge-2-vitl-normal）
 git clone https://github.com/microsoft/MoGe /filestorage/davidwang/code/MoGe
-# 权重根据 MoGe README 下载，通常通过 microsoft/moge HF repo
+hf download Ruicheng/moge-2-vitl-normal --local-dir /filestorage/davidwang/models/moge2
 
 # E.4 Qwen3.5-VL（若已发布）或 fallback Qwen2.5-VL
 huggingface-cli download Qwen/Qwen2.5-VL-7B-Instruct --local-dir /filestorage/davidwang/models/qwen-vl

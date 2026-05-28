@@ -8,6 +8,14 @@ from __future__ import annotations
 
 import json
 import subprocess
+
+# If static-ffmpeg is installed, register its binaries into PATH so that
+# subprocess calls to "ffmpeg"/"ffprobe" succeed without a system install.
+try:
+    import static_ffmpeg  # type: ignore
+    static_ffmpeg.add_paths()
+except ImportError:
+    pass
 from dataclasses import dataclass
 from pathlib import Path
 

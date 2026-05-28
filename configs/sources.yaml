@@ -11,6 +11,7 @@ sources:
     nominal_duration_s: 10
     real_or_synthetic: real
     target_clips: 158369
+    local_path_example: /mnt/aos/davidwang/workspace/data/spatialvid_hq/SpatialVID/videos/group_0001
 
   dl3dv_real:
     citation: "[86]"

@@ -49,25 +49,51 @@ class ClipJob:
 def _stage01_normalize(job: ClipJob, cfg: dict) -> ClipJob:
     from sana_wm_pipeline.stage01_ingest.normalize import normalize_video
     target = Path(cfg["paths"]["staging"]) / f"{job.sample_id}.mp4"
-    out_path = normalize_video(
+    target.parent.mkdir(parents=True, exist_ok=True)
+    w, h = cfg["target"]["resolution"]
+    normalize_video(
         src=Path(job.raw_path), dst=target,
-        resolution=tuple(cfg["target"]["resolution"]),
+        target_w=w, target_h=h,
         fps=cfg["target"]["fps"],
     )
-    job.normalized_path = str(out_path)
+    job.normalized_path = str(target)
+    return job
+
+
+def _stage02_pose_stub(job: ClipJob, cfg: dict) -> ClipJob:
+    """Write synthetic pose artifact; activated by SANA_WM_POSE_STUB=1."""
+    import json
+    import numpy as np
+    T = cfg["target"]["camera_frames"]  # 961 per paper App. D.1
+    work_dir = Path(cfg["paths"]["staging"]) / "pose" / job.sample_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    poses = np.eye(4, dtype=np.float32)[None].repeat(T, axis=0)
+    # (fx, fy, cx, cy) for 1280×720 @ 90° HFOV (plausible, not paper-specified)
+    intr = np.tile(
+        np.array([[960.0, 960.0, 640.0, 360.0]], dtype=np.float32),
+        (T, 1, 1),
+    )
+    scale = np.ones(T, dtype=np.float32)
+    (work_dir / "pose.json").write_text(
+        json.dumps({"poses_c2w": poses.tolist(), "intrinsics_per_frame_NVD": intr.tolist()})
+    )
+    np.save(str(work_dir / "scale.npy"), scale)
+    job.pose_artifact_path = str(work_dir)
     return job
 
 
 def _stage02_pose(job: ClipJob, cfg: dict) -> ClipJob:
-    # Dispatch by pose mode; actual subprocess calls live in mode_*.
-    # In smoke mode the caller must arrange for a stub VIPE/Pi3X binary.
+    import os
+    # Set SANA_WM_POSE_STUB=1 to bypass real VIPE/Pi3X/MoGe-2 (pipeline shape test).
+    if os.getenv("SANA_WM_POSE_STUB"):
+        return _stage02_pose_stub(job, cfg)
     mode_module = importlib.import_module(
         f"sana_wm_pipeline.stage02_pose.mode_{job.pose_mode}"
     )
     work_dir = Path(cfg["paths"]["staging"]) / "pose" / job.sample_id
     runner_name = f"run_{job.pose_mode}"
     runner = getattr(mode_module, runner_name)
-    artifact = runner(Path(job.normalized_path), work_dir)   # type: ignore[arg-type]
+    runner(Path(job.normalized_path), work_dir)   # type: ignore[arg-type]
     job.pose_artifact_path = str(work_dir)
     return job
 
@@ -168,6 +194,26 @@ _SOURCE_TO_POSE_MODE = {
 }
 
 
+def _resolve_video_path(src: dict, name: str, k: int) -> str:
+    """Return a concrete video path for job k of source `name`.
+
+    If ``local_path_example`` is a directory, pick the k-th mp4 found inside
+    (sorted); if fewer than k+1 files exist, wrap around.  Falls back to a
+    /tmp sentinel when no example is configured at all.
+    """
+    example = src.get("local_path_example")
+    if not example:
+        return f"/tmp/{name}_{k:06d}.mp4"
+    p = Path(example)
+    if p.is_dir():
+        clips = sorted(p.rglob("*.mp4"))
+        if clips:
+            return str(clips[k % len(clips)])
+        # Directory exists but no mp4s yet — return sentinel
+        return str(p / f"{name}_{k:06d}.mp4")
+    return str(p)
+
+
 def enumerate_jobs(sources_cfg: dict, smoke: bool) -> List[ClipJob]:
     jobs: List[ClipJob] = []
     sources = sources_cfg.get("sources", {})
@@ -177,7 +223,7 @@ def enumerate_jobs(sources_cfg: dict, smoke: bool) -> List[ClipJob]:
             jobs.append(ClipJob(
                 sample_id=f"{name}_{k:06d}",
                 source=name,
-                raw_path=str(src.get("local_path_example", f"/tmp/{name}_{k}.mp4")),
+                raw_path=_resolve_video_path(src, name, k),
                 pose_mode=_SOURCE_TO_POSE_MODE.get(name, "default"),
             ))
     return jobs

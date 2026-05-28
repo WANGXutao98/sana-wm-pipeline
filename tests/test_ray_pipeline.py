@@ -22,16 +22,26 @@ def test_pose_mode_dispatch_table():
     assert _SOURCE_TO_POSE_MODE["Sekai_Game"] == "gtpose"
 
 
-def test_enumerate_jobs_smoke_yields_one_per_source():
+def test_enumerate_jobs_smoke_yields_one_per_source_with_example():
+    # Sources with local_path_example configured produce 1 job in smoke mode;
+    # sources without it are skipped to avoid crashing on nonexistent /tmp sentinels.
     sources_cfg = {"sources": {
-        "A": {"target_clips": 100},
-        "B": {"target_clips": 50},
-        "C": {"target_clips": 0},   # zero-target source still emits 1 in smoke mode
+        "A": {"target_clips": 100, "local_path_example": "/tmp/a.mp4"},
+        "B": {"target_clips": 50},   # no local_path_example — skipped in smoke
+        "C": {"target_clips": 0, "local_path_example": "/tmp/c.mp4"},
     }}
     jobs = enumerate_jobs(sources_cfg, smoke=True)
     by_src = {j.source for j in jobs}
-    assert by_src == {"A", "B", "C"}
-    assert len(jobs) == 3
+    assert by_src == {"A", "C"}
+    assert len(jobs) == 2
+
+
+def test_enumerate_jobs_smoke_skips_sources_without_path():
+    sources_cfg = {"sources": {
+        "NoPath": {"target_clips": 10},
+    }}
+    jobs = enumerate_jobs(sources_cfg, smoke=True)
+    assert len(jobs) == 0
 
 
 def test_enumerate_jobs_full_uses_target_clips():

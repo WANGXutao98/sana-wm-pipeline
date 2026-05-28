@@ -14,8 +14,8 @@ import subprocess
 try:
     import static_ffmpeg  # type: ignore
     static_ffmpeg.add_paths()
-except ImportError:
-    pass
+except Exception:
+    pass  # Fallback to conda/system ffmpeg if static-ffmpeg unavailable or AFS flock fails
 from dataclasses import dataclass
 from pathlib import Path
 

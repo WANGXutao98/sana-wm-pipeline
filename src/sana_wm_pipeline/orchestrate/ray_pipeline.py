@@ -128,9 +128,38 @@ def _stage05_caption(job: ClipJob, cfg: dict) -> ClipJob:
 
 
 def _stage06_pack(job: ClipJob, cfg: dict) -> ClipJob:
+    import io
+    import json
+    import tarfile
+
     out_root = Path(cfg["paths"]["out_root"])
     out_root.mkdir(parents=True, exist_ok=True)
-    job.shard_path = str(out_root / "shard-000000.tar")
+    shard_path = out_root / "shard-000000.tar"
+
+    meta = {
+        "sample_id": job.sample_id,
+        "source": job.source,
+        "pose_mode": job.pose_mode,
+        "normalized_path": job.normalized_path,
+        "pose_artifact_path": job.pose_artifact_path,
+        "filter_scores": job.filter_scores,
+        "caption": job.caption,
+    }
+    meta_bytes = json.dumps(meta, indent=2).encode()
+
+    mode = "a" if shard_path.exists() else "w"
+    with tarfile.open(shard_path, mode) as tf:
+        for suffix, data in [
+            (f"{job.sample_id}.json", meta_bytes),
+        ]:
+            info = tarfile.TarInfo(name=suffix)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+        # Include the normalized mp4 if it exists
+        if job.normalized_path and Path(job.normalized_path).exists():
+            tf.add(job.normalized_path, arcname=f"{job.sample_id}.mp4")
+
+    job.shard_path = str(shard_path)
     return job
 
 
@@ -219,11 +248,17 @@ def enumerate_jobs(sources_cfg: dict, smoke: bool) -> List[ClipJob]:
     sources = sources_cfg.get("sources", {})
     for name, src in sources.items():
         target = 1 if smoke else int(src.get("target_clips", 0))
+        if smoke and not src.get("local_path_example"):
+            # No local video configured; skip in smoke rather than crashing on
+            # a nonexistent /tmp sentinel.
+            _LOG.warning("smoke: skipping %s — no local_path_example in sources.yaml", name)
+            continue
         for k in range(target):
+            raw = _resolve_video_path(src, name, k)
             jobs.append(ClipJob(
                 sample_id=f"{name}_{k:06d}",
                 source=name,
-                raw_path=_resolve_video_path(src, name, k),
+                raw_path=raw,
                 pose_mode=_SOURCE_TO_POSE_MODE.get(name, "default"),
             ))
     return jobs

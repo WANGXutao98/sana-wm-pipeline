@@ -110,24 +110,28 @@ def main():
             frame_paths.append(str(rgb_file))
             gt_poses_lines.append(" ".join(parts[2:]))  # ts tx ty tz qx qy qz qw
 
-        # 保存 GT 对齐序列（按帧序号排列）
-        gt_aligned = seq_dir / "gt_aligned.txt"
-        gt_aligned.write_text("# timestamp tx ty tz qx qy qz qw\n" + "\n".join(gt_poses_lines))
-        print(f"[gt] gt_aligned.txt: {len(gt_poses_lines)} poses")
-
         # 读取第一帧获取分辨率
         sample = cv2.imread(frame_paths[0])
         h, w = sample.shape[:2]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(str(mp4_path), fourcc, 30.0, (w, h))
-        for fp in frame_paths:
+
+        # 同步处理：帧和 pose 一起，只有帧读取成功时才写入和保留 pose
+        valid_gt_poses = []
+        for i, fp in enumerate(frame_paths):
             frame = cv2.imread(fp)
             if frame is None:
-                print(f"[warn] cannot read {fp}")
+                print(f"[warn] cannot read {fp}, skipping frame and pose")
                 continue
             writer.write(frame)
+            valid_gt_poses.append(gt_poses_lines[i])
         writer.release()
-        print(f"[mp4] {mp4_path}: {len(frame_paths)} frames @ {w}×{h} 30fps")
+
+        # 保存 GT 对齐序列（仅包含成功写入的帧对应的 pose）
+        gt_aligned = seq_dir / "gt_aligned.txt"
+        gt_aligned.write_text("# timestamp tx ty tz qx qy qz qw\n" + "\n".join(valid_gt_poses) + "\n")
+        print(f"[mp4] {mp4_path}: {len(valid_gt_poses)} frames @ {w}×{h} 30fps")
+        print(f"[gt] gt_aligned.txt: {len(valid_gt_poses)} poses")
     else:
         print("[skip] video.mp4 exists")
 

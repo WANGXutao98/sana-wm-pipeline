@@ -153,20 +153,27 @@ def compute_rte(pred: np.ndarray, gt: np.ndarray, delta: int = 30) -> dict:
 gt_poses = load_gt(SEQ / "gt_aligned.txt")
 print(f"GT poses loaded: {len(gt_poses)} frames")
 
-methods = {
-    "A: VIPE + unidepth-l (原版)": RESULTS / "method_A" / "pose" / "video.npz",
-    "B: VIPE + Pi3X+MoGe-2 (SANA-WM)": RESULTS / "method_B" / "pose" / "video.npz",
+METHODS = {
+    "A: VIPE + unidepth-l (原版)":          RESULTS / "method_A" / "pose" / "video.npz",
+    "B: VIPE + Pi3X+MoGe-2 (adaptive)":    RESULTS / "method_B" / "pose" / "video.npz",
+    "C: VIPE + Pi3X+MoGe-2 (video-batch)": RESULTS / "method_C" / "pose" / "video.npz",
+}
+
+METHOD_COLORS = {
+    "A: VIPE + unidepth-l (原版)":          "tab:red",
+    "B: VIPE + Pi3X+MoGe-2 (adaptive)":    "tab:blue",
+    "C: VIPE + Pi3X+MoGe-2 (video-batch)": "tab:green",
 }
 
 results: dict[str, dict] = {}
-for name, npz_path in methods.items():
+for name, npz_path in METHODS.items():
     if not npz_path.exists():
         print(f"[skip] {name}: {npz_path} not found")
         continue
     pred = load_vipe_poses(npz_path)
     ate  = compute_ate(pred, gt_poses)
     rte  = compute_rte(pred, gt_poses, delta=30)
-    results[name] = {"ate": ate, "rte": rte}
+    results[name] = {"ate": ate, "rte": rte, "path": npz_path}
     print(f"\n{'='*60}")
     print(f"Method: {name}")
     print(f"  帧数:         pred={len(pred)}, gt={len(gt_poses)}, eval={min(len(pred),len(gt_poses))}")
@@ -181,45 +188,45 @@ for name, npz_path in methods.items():
     print(f"  RTE 后半漂移平移: {rte['trans_2nd_half']:.4f} m")
 
 if len(results) < 2:
-    print("\n[warn] 少于两组结果，跳过对比图（运行完两组推理后重新执行）")
+    print("\n[warn] 少于两组结果，跳过对比图（运行完推理后重新执行）")
 else:
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-    colors = {
-        "A: VIPE + unidepth-l (原版)": "tab:red",
-        "B: VIPE + Pi3X+MoGe-2 (SANA-WM)": "tab:blue",
-    }
+    n_methods = len(results)
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
+    # ── 轨迹俯视图 ──
     ax = axes[0]
     ax.set_title("轨迹对比（俯视 X-Z 平面）", fontsize=10)
     gt_t = gt_poses[:, :3, 3]
     ax.plot(gt_t[:, 0], gt_t[:, 2], "k-", lw=2, label="GT", zorder=10)
     for name, data in results.items():
-        npz = methods[name]
-        pred = load_vipe_poses(npz)
+        pred = load_vipe_poses(data["path"])
         n = min(len(pred), len(gt_poses))
         aligned, _ = align_to_gt(pred[:n], gt_poses[:n])
         ax.plot(aligned[:, 0, 3], aligned[:, 2, 3],
-                color=colors[name], lw=1.2, label=name, alpha=0.8)
+                color=METHOD_COLORS[name], lw=1.2, label=name.split("(")[0].strip(), alpha=0.8)
     ax.legend(fontsize=7); ax.set_xlabel("X (m)"); ax.set_ylabel("Z (m)")
 
+    # ── 逐帧 ATE ──
     ax = axes[1]
     ax.set_title("逐帧 ATE（Sim3 对齐）", fontsize=10)
     for name, data in results.items():
         errs = data["ate"]["per_frame"]
-        ax.plot(errs, color=colors[name], lw=0.8, label=name, alpha=0.9)
+        ax.plot(errs, color=METHOD_COLORS[name], lw=0.8,
+                label=name.split("(")[0].strip(), alpha=0.9)
     half_n = len(list(results.values())[0]["ate"]["per_frame"]) // 2
     ax.axvline(x=half_n, color="gray", ls="--", lw=0.8, label="中点")
     ax.legend(fontsize=7); ax.set_xlabel("帧序号"); ax.set_ylabel("误差 (m)")
 
+    # ── ATE RMSE 柱状图 ──
     ax = axes[2]
     ax.set_title("ATE RMSE（越低越好）", fontsize=10)
     names = list(results.keys())
     vals  = [results[n]["ate"]["rmse"] for n in names]
     x     = np.arange(len(names))
-    bars  = ax.bar(x, vals, color=[colors[n] for n in names], alpha=0.8)
+    bars  = ax.bar(x, vals, color=[METHOD_COLORS[n] for n in names], alpha=0.8)
     ax.bar_label(bars, fmt="%.4f", fontsize=9)
     ax.set_xticks(x)
-    ax.set_xticklabels([n.split("(")[0].strip() for n in names], fontsize=8)
+    ax.set_xticklabels([n.split("(")[0].strip() for n in names], fontsize=7)
     ax.set_ylabel("RMSE (m)")
 
     plt.tight_layout()
@@ -227,20 +234,28 @@ else:
     plt.savefig(out_fig, dpi=150)
     print(f"\n[plot] 图表保存到 {out_fig}")
 
-    print("\n" + "="*65)
-    print(f"{'指标':<30} {'A: VIPE原版':>15} {'B: SANA-WM':>15}")
-    print("="*65)
+    # ── 汇总表 ──
+    col_names = list(results.keys())
+    header_width = 28
+    col_width = 16
+    print("\n" + "=" * (header_width + col_width * len(col_names) + 2))
+    header = f"{'指标':<{header_width}}" + "".join(f"{n.split('(')[0].strip():>{col_width}}" for n in col_names)
+    print(header)
+    print("=" * (header_width + col_width * len(col_names) + 2))
     rows = [
-        ("ATE RMSE (Sim3) ↓ (m)",    "ate", "rmse"),
-        ("ATE mean ↓ (m)",            "ate", "mean"),
-        ("RTE 旋转均值 ↓ (°)",         "rte", "rot_mean"),
-        ("RTE 平移均值 ↓ (m)",         "rte", "trans_mean"),
-        ("RTE 后半段旋转 ↓ (°)",       "rte", "rot_2nd_half"),
-        ("RTE 后半段平移 ↓ (m)",       "rte", "trans_2nd_half"),
+        ("ATE RMSE (Sim3) ↓ (m)",   "ate", "rmse"),
+        ("ATE mean ↓ (m)",           "ate", "mean"),
+        ("ATE max ↓ (m)",            "ate", "max"),
+        ("估计尺度 (→1.0)",           "ate", "scale"),
+        ("RTE 旋转均值 ↓ (°)",        "rte", "rot_mean"),
+        ("RTE 平移均值 ↓ (m)",        "rte", "trans_mean"),
+        ("RTE 后半旋转 ↓ (°)",        "rte", "rot_2nd_half"),
+        ("RTE 后半平移 ↓ (m)",        "rte", "trans_2nd_half"),
     ]
     for label, key, sub in rows:
-        vals_str = []
-        for n in ["A: VIPE + unidepth-l (原版)", "B: VIPE + Pi3X+MoGe-2 (SANA-WM)"]:
-            vals_str.append(f"{results[n][key][sub]:>15.4f}")
-        print(f"{label:<30} {'  '.join(vals_str)}")
-    print("="*65)
+        vals_row = [results[n][key][sub] for n in col_names]
+        row_str = f"{label:<{header_width}}"
+        for v in vals_row:
+            row_str += f"{v:>{col_width}.4f}"
+        print(row_str)
+    print("=" * (header_width + col_width * len(col_names) + 2))

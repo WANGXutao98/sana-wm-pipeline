@@ -83,16 +83,19 @@ class Pi3XMoGe2DepthModel(DepthEstimationModel):
             )
 
         try:
-            from pi3 import Pi3  # type: ignore
-            self._pi3x = Pi3.from_pretrained(pi3x_weights).to(self.device).eval()
+            from pi3 import Pi3X  # type: ignore
+            self._pi3x = Pi3X.from_pretrained(pi3x_weights).to(self.device).eval()
         except ImportError as e:
             raise RuntimeError(
                 "Pi3X (pip install git+https://github.com/yyfz/Pi3.git) not found."
             ) from e
 
         try:
-            from moge.model import MoGeModel  # type: ignore
-            self._moge2 = MoGeModel.from_pretrained(moge2_weights).to(self.device).eval()
+            from moge.model.v2 import MoGeModel  # type: ignore
+            import pathlib
+            moge2_path = pathlib.Path(moge2_weights)
+            moge2_ckpt = moge2_path / "model.pt" if moge2_path.is_dir() else moge2_path
+            self._moge2 = MoGeModel.from_pretrained(str(moge2_ckpt)).to(self.device).eval()
         except ImportError as e:
             raise RuntimeError(
                 "MoGe (pip install git+https://github.com/microsoft/MoGe.git) not found."
@@ -126,8 +129,11 @@ class Pi3XMoGe2DepthModel(DepthEstimationModel):
         rgb = unpack_optional(src.rgb).to(self.device)
         if rgb.dim() == 3:
             rgb = rgb[None]
-        # MoGe-2 inference
-        inp = rgb.permute(0, 3, 1, 2)  # (1,3,H,W)
+            was_unbatched = True
+        else:
+            was_unbatched = False
+        # MoGe-2 inference — rgb is (B, H, W, 3) here
+        inp = rgb.permute(0, 3, 1, 2)  # (B, 3, H, W)
         fov_x = None
         if src.intrinsics is not None:
             fx = src.intrinsics[0].item()
@@ -135,21 +141,57 @@ class Pi3XMoGe2DepthModel(DepthEstimationModel):
             import math
             fov_x = math.degrees(2 * math.atan(w / (2 * fx)))
         out = self._moge2.infer(inp, fov_x=fov_x)  # type: ignore[union-attr]
-        depth = out["depth"].squeeze(0)  # (H,W)
+        depth = out["depth"]  # (B, H, W)
+        if was_unbatched:
+            depth = depth.squeeze(0)  # (H, W) only if we added the batch dim ourselves
         return DepthEstimationResult(metric_depth=depth)
 
     @torch.no_grad()
     def _estimate_video(self, src: DepthEstimationInput) -> DepthEstimationResult:
-        """Run Pi3X (full sequence) + MoGe-2 (per-frame) and fuse."""
+        """Run Pi3X (chunked) + MoGe-2 (per-frame) and fuse."""
         frames = src.video_frame_list  # list of (H,W,3) float32 [0,1]
         assert frames is not None
         T = len(frames)
 
-        # Pi3X: batch (T, H, W, 3) -> consistent depth (T, H, W)
+        import torch.nn.functional as F_nn
+
         frames_np = np.stack(frames, axis=0)  # (T,H,W,3)
         frames_t = torch.from_numpy(frames_np).to(self.device).permute(0, 3, 1, 2)  # (T,3,H,W)
-        pi3x_out = self._pi3x.infer(frames_t)  # type: ignore[union-attr]
-        d_pi3x = pi3x_out["depth"].cpu().numpy()  # (T,H,W)
+        H_img, W_img = frames_np.shape[1], frames_np.shape[2]
+
+        # Pi3X requires H and W to be multiples of patch size 14
+        H_r = (H_img // 14) * 14
+        W_r = (W_img // 14) * 14
+        if H_r != H_img or W_r != W_img:
+            frames_pi3x = F_nn.interpolate(frames_t, size=(H_r, W_r), mode='bilinear', align_corners=False)
+        else:
+            frames_pi3x = frames_t
+
+        # Pi3X forward: (B, N, 3, H, W) -> local_points (B, N, H, W, 3), depth = z-component
+        # Process in chunks of 16 (ViT attention is O(N^2 x patches^2) — full 600+ frames OOM)
+        CHUNK, STRIDE = 16, 8
+        d_pi3x_accum = np.zeros((T, H_r, W_r), dtype=np.float32)
+        count = np.zeros(T, dtype=np.float32)
+        starts = list(range(0, max(T - CHUNK + 1, 1), STRIDE))
+        if not starts or starts[-1] + CHUNK < T:
+            starts.append(max(0, T - CHUNK))
+        for s in starts:
+            e = min(s + CHUNK, T)
+            chunk = frames_pi3x[s:e].unsqueeze(0)  # (1, n, 3, H_r, W_r)
+            out = self._pi3x(chunk)  # type: ignore[union-attr]
+            d_chunk = out["local_points"][0, :e-s, :, :, 2].cpu().numpy()  # (n, H_r, W_r)
+            d_pi3x_accum[s:e] += d_chunk
+            count[s:e] += 1
+        d_pi3x_r = d_pi3x_accum / np.maximum(count[:, None, None], 1.0)  # (T, H_r, W_r)
+
+        # Upsample Pi3X depth back to original resolution
+        if H_r != H_img or W_r != W_img:
+            d_pi3x = F_nn.interpolate(
+                torch.from_numpy(d_pi3x_r).unsqueeze(1).to(self.device),
+                size=(H_img, W_img), mode='bilinear', align_corners=False
+            ).squeeze(1).cpu().numpy()
+        else:
+            d_pi3x = d_pi3x_r
 
         # MoGe-2: per-frame metric depth
         fov_x = None

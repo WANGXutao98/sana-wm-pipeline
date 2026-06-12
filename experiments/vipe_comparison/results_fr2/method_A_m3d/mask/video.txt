@@ -1,0 +1,5 @@
+0: background
+1: animal
+2: balloon
+3: person
+4: person

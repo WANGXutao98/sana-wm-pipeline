@@ -15,7 +15,7 @@ class ShardWriter:
     """
 
     def __init__(self, out_dir: Path | str, samples_per_shard: int = 1000,
-                 prefix: str = "shard"):
+                 prefix: str = "shard", strict_frames: bool = True):
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         if samples_per_shard < 1:
@@ -25,6 +25,7 @@ class ShardWriter:
         self.shard_id = 0
         self.count_in_shard = 0
         self._tar: tarfile.TarFile | None = None
+        self._strict_frames = strict_frames
         self._open_new_shard()
 
     @property
@@ -47,7 +48,7 @@ class ShardWriter:
         self._add_bytes(name, buf.getvalue())
 
     def write(self, sample: Sample) -> None:
-        sample.validate()
+        sample.validate(strict_frames=self._strict_frames)
         if self._tar is None:
             self._open_new_shard()
         sid = sample.sample_id

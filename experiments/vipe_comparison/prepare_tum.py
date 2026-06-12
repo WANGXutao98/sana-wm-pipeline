@@ -12,7 +12,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-URL = "https://vision.in.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_desk.tgz"
+SEQ_URLS = {
+    "freiburg1_desk": "https://vision.in.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_desk.tgz",
+    "freiburg2_desk": "https://vision.in.tum.de/rgbd/dataset/freiburg2/rgbd_dataset_freiburg2_desk.tgz",
+}
 ASSOC_URL = "https://svncvpr.in.tum.de/cvpr-ros-pkg/trunk/rgbd_benchmark/rgbd_benchmark_tools/src/rgbd_benchmark_tools/associate.py"
 
 def download(url: str, dest: Path):
@@ -59,19 +62,27 @@ def associate(first_list, second_list, offset=0.0, max_difference=0.02):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="experiments/vipe_comparison/data")
+    parser.add_argument("--seq", default="freiburg1_desk",
+                        choices=list(SEQ_URLS.keys()),
+                        help="TUM sequence name")
     args = parser.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    seq_name = args.seq
+    URL = SEQ_URLS[seq_name]
+    print(f"[prepare] Sequence: {seq_name}")
+
     # 1. 下载 TGZ
-    tgz = out / "rgbd_dataset_freiburg1_desk.tgz"
+    tgz = out / f"rgbd_dataset_{seq_name}.tgz"
     download(URL, tgz)
 
     # 2. 解压
-    seq_dir = out / "rgbd_dataset_freiburg1_desk"
+    seq_dir = out / f"rgbd_dataset_{seq_name}"
     if not seq_dir.exists():
         print("[extract] decompressing...")
         subprocess.check_call(["tar", "xzf", str(tgz), "-C", str(out), "--no-same-owner"])
+        print(f"[extract] done: {seq_dir}")
     else:
         print("[skip] already extracted")
 

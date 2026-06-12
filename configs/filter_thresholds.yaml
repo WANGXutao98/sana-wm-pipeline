@@ -65,6 +65,15 @@ per_source:
     vlm_entity:       [0, 10]
     vlm_quality:      [0.5, 1.5]
 
+  DL3DV:                        # default 模式，Stage-03 跳过
+    vmaf_motion:      [0.5, 100]
+    unimatch_flow:    null       # UniMatch 未安装
+    dover:            null       # DOVER 未安装
+    color_saturation: [0, 180]
+    scene_cuts_max:   2
+    vlm_entity:       null
+    vlm_quality:      null
+
 # Uniform camera filters live elsewhere; documented here for cross-reference.
 camera:
   fov_deg:          [25, 120]

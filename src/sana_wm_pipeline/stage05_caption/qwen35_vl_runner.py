@@ -17,6 +17,9 @@ from .prompts import SCENE_STATIC_PROMPT
 # Lazy global model cache: (model, processor)
 _MODEL: Optional[tuple] = None
 
+# Caption fallback when VLM is unavailable or all retries fail
+CAPTION_FALLBACK = "a scene captured by a moving camera with natural indoor lighting"
+
 
 def _try_load_qwen(model_id: str):
     """Load Qwen-VL model + processor; return (model, processor) or None."""
@@ -97,13 +100,17 @@ def caption_clip(
 
     Returns the first generation that passes `has_camera_verb()` check;
     if none of `max_retries + 1` attempts pass, returns the last attempt
-    with offending sentences stripped (may be empty).
+    with offending sentences stripped. Falls back to CAPTION_FALLBACK if
+    generation fails (RuntimeError) or all results are empty.
     """
     gen = generate_fn if generate_fn is not None else _default_generate
     keyframes = _sample_keyframes(frames_rgb)
     last = ""
     for _ in range(max_retries + 1):
-        last = gen(SCENE_STATIC_PROMPT, keyframes) or ""
+        try:
+            last = gen(SCENE_STATIC_PROMPT, keyframes) or ""
+        except RuntimeError:
+            return CAPTION_FALLBACK
         if not has_camera_verb(last):
             return last
-    return strip_offending_sentences(last)
+    return strip_offending_sentences(last) or CAPTION_FALLBACK

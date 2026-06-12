@@ -56,6 +56,12 @@ def test_default_mode_loads_artifact(monkeypatch, tmp_path: Path):
                  data=intr_raw, inds=np.arange(T_frames))
 
     monkeypatch.setattr(
+        "sana_wm_pipeline.stage02_pose.mode_default._precompute_depth_cache",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setenv("SANA_WM_PI3X_WEIGHTS", "/fake/pi3x")
+    monkeypatch.setenv("SANA_WM_MOGE2_WEIGHTS", "/fake/moge2")
+    monkeypatch.setattr(
         "sana_wm_pipeline.stage02_pose.mode_default.subprocess.check_call",
         fake_call,
     )

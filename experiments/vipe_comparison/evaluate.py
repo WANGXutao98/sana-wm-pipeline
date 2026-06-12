@@ -154,15 +154,13 @@ gt_poses = load_gt(SEQ / "gt_aligned.txt")
 print(f"GT poses loaded: {len(gt_poses)} frames")
 
 METHODS = {
-    "A: VIPE + unidepth-l (原版)":          RESULTS / "method_A" / "pose" / "video.npz",
-    "B: VIPE + Pi3X+MoGe-2 (adaptive)":    RESULTS / "method_B" / "pose" / "video.npz",
-    "C: VIPE + Pi3X+MoGe-2 (video-batch)": RESULTS / "method_C" / "pose" / "video.npz",
+    "A: VIPE + metric3d-small (论文 baseline)": RESULTS / "method_A_m3d" / "pose" / "video.npz",
+    "B: VIPE + Pi3X+MoGe-2 (cached, SANA-WM)": RESULTS / "method_B_cached" / "pose" / "video.npz",
 }
 
 METHOD_COLORS = {
-    "A: VIPE + unidepth-l (原版)":          "tab:red",
-    "B: VIPE + Pi3X+MoGe-2 (adaptive)":    "tab:blue",
-    "C: VIPE + Pi3X+MoGe-2 (video-batch)": "tab:green",
+    "A: VIPE + metric3d-small (论文 baseline)": "tab:red",
+    "B: VIPE + Pi3X+MoGe-2 (cached, SANA-WM)": "tab:green",
 }
 
 results: dict[str, dict] = {}

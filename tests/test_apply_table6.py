@@ -27,9 +27,9 @@ def cfg():
 
 
 # ---- Table 6 verbatim values are in the YAML -------------------------------
-def test_yaml_has_all_six_sources(cfg):
+def test_yaml_has_all_sources(cfg):
     expected = {"OmniWorld", "Sekai_Game", "Sekai_Walking",
-                "MiraData", "DL3DV_GS", "SpatialVID"}
+                "MiraData", "DL3DV", "DL3DV_GS", "SpatialVID"}
     assert set(cfg["per_source"].keys()) == expected
 
 

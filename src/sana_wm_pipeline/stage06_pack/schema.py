@@ -28,21 +28,33 @@ class Sample:
     caption: str
     meta: dict
 
-    def validate(self) -> None:
+    def validate(self, strict_frames: bool = True) -> None:
         T = CAMERA_FRAMES
-        if self.poses_c2w.shape != (T, 4, 4):
-            raise ValueError(f"poses_c2w shape {self.poses_c2w.shape} != ({T},4,4)")
+        if strict_frames:
+            if self.poses_c2w.shape != (T, 4, 4):
+                raise ValueError(f"poses_c2w shape {self.poses_c2w.shape} != ({T},4,4)")
+        else:
+            if self.poses_c2w.ndim != 3 or self.poses_c2w.shape[1:] != (4, 4):
+                raise ValueError(f"poses_c2w must be (T,4,4), got {self.poses_c2w.shape}")
         if self.poses_c2w.dtype != np.float32:
             raise ValueError(f"poses_c2w dtype {self.poses_c2w.dtype} != float32")
-        if self.intrinsics_NVD.shape != (T, INTRINSICS_VIEWS, INTRINSICS_DIM):
-            raise ValueError(
-                f"intrinsics_NVD shape {self.intrinsics_NVD.shape} "
-                f"!= ({T},{INTRINSICS_VIEWS},{INTRINSICS_DIM})"
-            )
+        if strict_frames:
+            if self.intrinsics_NVD.shape != (T, INTRINSICS_VIEWS, INTRINSICS_DIM):
+                raise ValueError(
+                    f"intrinsics_NVD shape {self.intrinsics_NVD.shape} "
+                    f"!= ({T},{INTRINSICS_VIEWS},{INTRINSICS_DIM})"
+                )
+        else:
+            if self.intrinsics_NVD.ndim != 3 or self.intrinsics_NVD.shape[1:] != (INTRINSICS_VIEWS, INTRINSICS_DIM):
+                raise ValueError(f"intrinsics_NVD must be (T,{INTRINSICS_VIEWS},{INTRINSICS_DIM}), got {self.intrinsics_NVD.shape}")
         if self.intrinsics_NVD.dtype != np.float32:
             raise ValueError(f"intrinsics_NVD dtype {self.intrinsics_NVD.dtype} != float32")
-        if self.scale_per_frame.shape != (T,):
-            raise ValueError(f"scale_per_frame shape {self.scale_per_frame.shape} != ({T},)")
+        if strict_frames:
+            if self.scale_per_frame.shape != (T,):
+                raise ValueError(f"scale_per_frame shape {self.scale_per_frame.shape} != ({T},)")
+        else:
+            if self.scale_per_frame.ndim != 1:
+                raise ValueError(f"scale_per_frame must be 1D, got {self.scale_per_frame.shape}")
         if self.scale_per_frame.dtype != np.float32:
             raise ValueError(f"scale_per_frame dtype != float32")
         if not self.caption.strip():

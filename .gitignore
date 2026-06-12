@@ -64,3 +64,4 @@ data/
 
 # Project-local ffmpeg/ffprobe symlinks (host-specific)
 .bin/
+experiments/vipe_comparison/results/cache_pi3x_moge2_fr2_desk.npz

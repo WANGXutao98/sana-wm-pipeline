@@ -28,6 +28,7 @@ export TORCH_HOME=/mnt/afs/davidwang/cache/torch
 export HF_HOME=/mnt/afs/davidwang/cache/huggingface
 export SANA_WM_MOGE2_WEIGHTS=/mnt/afs/davidwang/models/moge2
 export DISABLE_XFORMERS=1
+export VIPE_EXT_JIT=1   # pre-built slam_ext API mismatch; JIT recompiles on first run (~2min)
 
 ANNOT_DIR="${1:?Usage: $0 <annotations_scene_dir> [<video_scene_dir>]}"
 VIDEO_DIR="${2:-${ANNOT_DIR}}"   # 若未提供则与 annotations 相同
@@ -161,6 +162,8 @@ if [ ! -f "${CAPTION_FILE}" ]; then
 fi
 
 # ── Stage 6: pack → WebDataset shard ────────────────────────────────────────
+# 文件命名格式：{scene_id}.{suffix}，符合 verify_and_eval.py REQUIRED_SUFFIXES：
+#   mp4 / poses_c2w.npy / intrinsics.npy / scale.npy / caption.txt / meta.json
 echo ""
 echo "=== Stage 6: pack WebDataset shard ==="
 SHARD="${SHARDS_DIR}/shard-000001.tar"
@@ -177,45 +180,41 @@ caption_p  = Path("${CAPTION_FILE}")
 shard      = Path("${SHARD}")
 
 art = json.loads((vipe_work / "pose_artifact.json").read_text())
-poses_c2w      = np.array(art["poses_c2w"],       dtype=np.float32)
-intrinsics_nvd = np.array(art["intrinsics"],       dtype=np.float32)
-scale_pf       = np.array(art["scale_per_frame"],  dtype=np.float32)
+poses_c2w  = np.array(art["poses_c2w"],       dtype=np.float32)
+intrinsics = np.array(art["intrinsics"],       dtype=np.float32)
+scale      = np.array(art["scale_per_frame"],  dtype=np.float32)
 T = len(poses_c2w)
 
-# 2x 降采样深度图节省空间
-d_norm = np.load(str(norm_depth)).astype(np.float32)
-depth_ds = d_norm[:T, ::2, ::2]
-
-def add_npy(tf, name, arr):
-    buf = io.BytesIO()
-    np.save(buf, arr)
-    raw = buf.getvalue()
-    ti = tarfile.TarInfo(f"{scene_id}/{name}")
-    ti.size = len(raw)
+def add_npy(tf, key, arr):
+    # key e.g. "poses_c2w.npy"  →  tar name "{scene_id}.{key}"
+    buf = io.BytesIO(); np.save(buf, arr); raw = buf.getvalue()
+    ti = tarfile.TarInfo(f"{scene_id}.{key}"); ti.size = len(raw)
     tf.addfile(ti, io.BytesIO(raw))
 
 with tarfile.open(shard, "w") as tf:
+    # video: {scene_id}.mp4
     vbytes = norm_video.read_bytes()
-    ti = tarfile.TarInfo(f"{scene_id}/video.mp4"); ti.size = len(vbytes)
+    ti = tarfile.TarInfo(f"{scene_id}.mp4"); ti.size = len(vbytes)
     tf.addfile(ti, io.BytesIO(vbytes))
 
-    add_npy(tf, "poses_c2w.npy",        poses_c2w)
-    add_npy(tf, "intrinsics_NVD.npy",   intrinsics_nvd)
-    add_npy(tf, "scale_per_frame.npy",  scale_pf)
-    add_npy(tf, "depth_downsampled.npy", depth_ds)
+    add_npy(tf, "poses_c2w.npy",  poses_c2w)
+    add_npy(tf, "intrinsics.npy", intrinsics)   # schema expects "intrinsics.npy"
+    add_npy(tf, "scale.npy",      scale)         # schema expects "scale.npy"
 
+    # caption: {scene_id}.caption.txt
     cbytes = caption_p.read_bytes()
-    ti = tarfile.TarInfo(f"{scene_id}/caption.txt"); ti.size = len(cbytes)
+    ti = tarfile.TarInfo(f"{scene_id}.caption.txt"); ti.size = len(cbytes)
     tf.addfile(ti, io.BytesIO(cbytes))
 
+    # meta: {scene_id}.meta.json
     meta = {"scene_id": scene_id, "T": T, "mode": "gt_depth", "dataset": "OmniWorld"}
     mbytes = json.dumps(meta).encode()
-    ti = tarfile.TarInfo(f"{scene_id}/meta.json"); ti.size = len(mbytes)
+    ti = tarfile.TarInfo(f"{scene_id}.meta.json"); ti.size = len(mbytes)
     tf.addfile(ti, io.BytesIO(mbytes))
 
 print(f"Shard: {shard}  ({shard.stat().st_size/1e6:.1f} MB)")
-members = [m.name.split('/')[-1] for m in tarfile.open(shard).getmembers()]
-print(f"Contents: {members}")
+with tarfile.open(shard) as tf:
+    print(f"Contents: {[m.name for m in tf.getmembers()]}")
 PYEOF
 
 # ── Schema check ─────────────────────────────────────────────────────────────
@@ -235,6 +234,6 @@ echo "下一步（pose 评估）："
 echo "  python experiments/data_production_smoke/verify_and_eval.py \\"
 echo "    --mode pose-eval \\"
 echo "    --shards-dir ${SHARDS_DIR} \\"
-echo "    --scenes-dir ${PREP_DIR} \\"
+echo "    --scenes-dir ${WORK_BASE} \\"
 echo "    --out-dir ${SHARDS_DIR}/eval_output"
 echo "========================================================================"

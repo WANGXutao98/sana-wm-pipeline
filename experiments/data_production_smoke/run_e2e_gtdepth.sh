@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # GT-depth 模式端到端：OmniWorld 单场景 → WebDataset shard
 #
-# 用法：
+# 真实 ModelScope OmniWorld 数据结构（tar.gz 格式）：
+#   DATA_ROOT/annotations/OmniWorld-Game/<scene_id>/  → *_depth_*.tar.gz, *_others.tar.gz
+#   DATA_ROOT/videos/OmniWorld-Game/<scene_id>/       → *_rgb_*.tar.gz
+#
+# 用法（推荐）：
 #   bash experiments/data_production_smoke/run_e2e_gtdepth.sh \
-#     /mnt/afs/davidwang/data/omniworld/OmniWorld-Game/<scene_id>
+#     <DATA_ROOT>/annotations/OmniWorld-Game/<scene_id> \
+#     <DATA_ROOT>/videos/OmniWorld-Game/<scene_id>
+#
+# 若只有一个参数（annotations 和 videos 在同一目录）：
+#   bash experiments/data_production_smoke/run_e2e_gtdepth.sh <unified_scene_dir>
 #
 # 前置：
 #   - conda env sana_wm 已激活（或由此脚本激活）
 #   - SANA_WM_MOGE2_WEIGHTS 已指向 MoGe-2 权重
-#   - 场景目录含 color/ depth/ camera/ fps.txt
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,8 +29,9 @@ export HF_HOME=/mnt/afs/davidwang/cache/huggingface
 export SANA_WM_MOGE2_WEIGHTS=/mnt/afs/davidwang/models/moge2
 export DISABLE_XFORMERS=1
 
-SCENE_DIR="${1:?Usage: $0 <omniworld_scene_dir>}"
-SCENE_ID="$(basename "${SCENE_DIR}")"
+ANNOT_DIR="${1:?Usage: $0 <annotations_scene_dir> [<video_scene_dir>]}"
+VIDEO_DIR="${2:-${ANNOT_DIR}}"   # 若未提供则与 annotations 相同
+SCENE_ID="$(basename "${ANNOT_DIR}")"
 WORK_BASE="/mnt/afs/davidwang/workspace/data/omniworld_smoke"
 PREP_DIR="${WORK_BASE}/${SCENE_ID}"
 SHARDS_DIR="${WORK_BASE}/shards_gtdepth"
@@ -34,17 +42,26 @@ cd "${PROJECT_ROOT}"
 
 echo "========================================================================"
 echo " GT-depth E2E: ${SCENE_ID}"
+echo "  annotations: ${ANNOT_DIR}"
+echo "  videos:      ${VIDEO_DIR}"
 echo "========================================================================"
 
-# ── Stage 0: 准备 OmniWorld 场景 ─────────────────────────────────────────────
+# ── Stage 0: 准备 OmniWorld 场景（提取 tar.gz → video.mp4 + gt_depth.npy）─────
 echo ""
 echo "=== Stage 0: prepare OmniWorld scene ==="
-python experiments/data_production_smoke/prepare_omniworld.py \
-  --scene-dir "${SCENE_DIR}" \
-  --out-dir   "${PREP_DIR}"
-
 VIDEO="${PREP_DIR}/video.mp4"
 GT_DEPTH="${PREP_DIR}/gt_depth.npy"
+
+if [ ! -f "${VIDEO}" ] || [ ! -f "${GT_DEPTH}" ]; then
+  python experiments/data_production_smoke/prepare_omniworld.py \
+    --annot-dir "${ANNOT_DIR}" \
+    --video-dir "${VIDEO_DIR}" \
+    --out-dir   "${PREP_DIR}" \
+    --split-idx 0 \
+    --max-frames 80
+else
+  echo "video.mp4 and gt_depth.npy already exist, skipping prepare."
+fi
 
 if [ ! -f "${VIDEO}" ]; then
   echo "[ERROR] video.mp4 not found after prepare_omniworld.py" >&2; exit 1
@@ -55,7 +72,7 @@ fi
 
 # ── Stage 1: normalize（统一分辨率/帧率）────────────────────────────────────
 echo ""
-echo "=== Stage 1: normalize video ==="
+echo "=== Stage 1: normalize video to 16fps ==="
 NORM_VIDEO="${PREP_DIR}/normalized.mp4"
 if [ ! -f "${NORM_VIDEO}" ]; then
   python - <<PYEOF
@@ -68,10 +85,9 @@ else
   echo "Already normalized: ${NORM_VIDEO}"
 fi
 
-# ── Stage 1b: 将 GT depth 重采样到归一化后帧率（16fps）──────────────────────
-# normalize 后视频帧数与原始帧率不同，GT depth 必须按时间戳对齐
+# ── Stage 1b: 将 GT depth 重采样到归一化后帧数（时间戳对齐）─────────────────
 echo ""
-echo "=== Stage 1b: resample GT depth to 16fps ==="
+echo "=== Stage 1b: resample GT depth to match normalized frame count ==="
 NORM_DEPTH="${PREP_DIR}/gt_depth_16fps.npy"
 ORIG_FPS_FILE="${PREP_DIR}/orig_fps.txt"
 if [ ! -f "${NORM_DEPTH}" ]; then
@@ -79,37 +95,32 @@ if [ ! -f "${NORM_DEPTH}" ]; then
 import cv2, numpy as np
 from pathlib import Path
 
-# 归一化后的帧数
 cap = cv2.VideoCapture("${NORM_VIDEO}")
 T_norm = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 cap.release()
 
-# 原始帧数 / fps
-d_orig = np.load("${GT_DEPTH}")  # (T_orig, H, W)
+d_orig = np.load("${GT_DEPTH}")       # (T_orig, H, W)
 T_orig = len(d_orig)
 orig_fps_file = Path("${ORIG_FPS_FILE}")
 orig_fps = float(orig_fps_file.read_text().strip()) if orig_fps_file.exists() else 30.0
 
-# 按时间戳映射：norm 帧 i (16fps) → orig 帧 j
-# j = round(i / 16.0 * orig_fps)
 target_fps = 16.0
-t_norm = np.arange(T_norm) / target_fps         # 归一化帧时间戳 (秒)
-t_orig = np.arange(T_orig) / orig_fps            # 原始帧时间戳 (秒)
+t_norm = np.arange(T_norm) / target_fps
+t_orig = np.arange(T_orig) / orig_fps
 indices = np.round(np.interp(t_norm, t_orig, np.arange(T_orig))).astype(int)
 indices = np.clip(indices, 0, T_orig - 1)
-d_resampled = d_orig[indices]                    # (T_norm, H, W)
+d_resampled = d_orig[indices]
 
 np.save("${NORM_DEPTH}", d_resampled)
-print(f"GT depth resampled: {T_orig} frames@{orig_fps}fps -> {T_norm} frames@{target_fps}fps")
-print(f"Saved: ${NORM_DEPTH}  shape={d_resampled.shape}")
+print(f"GT depth resampled: {T_orig}@{orig_fps}fps → {T_norm}@{target_fps}fps  shape={d_resampled.shape}")
 PYEOF
 else
   echo "Already resampled: ${NORM_DEPTH}"
 fi
 
-# ── Stage 2: GT-depth VIPE SLAM ─────────────────────────────────────────────
+# ── Stage 2: GT-depth VIPE SLAM（MoGe-2 metric anchor + VIPE BA）────────────
 echo ""
-echo "=== Stage 2: GT-depth VIPE SLAM (MoGe-2 + VIPE) ==="
+echo "=== Stage 2: GT-depth VIPE SLAM ==="
 ARTIFACT_JSON="${VIPE_WORK}/pose_artifact.json"
 
 if [ ! -f "${ARTIFACT_JSON}" ]; then
@@ -119,35 +130,33 @@ from pathlib import Path
 from sana_wm_pipeline.stage02_pose.mode_gtdepth import run_gtdepth
 
 clip     = Path("${NORM_VIDEO}")
-gt_depth = Path("${NORM_DEPTH}")   # 16fps 对齐后的 GT depth
+gt_depth = Path("${NORM_DEPTH}")
 work_dir = Path("${VIPE_WORK}")
-out_json = work_dir / "pose_artifact.json"
 
-print(f"GT depth shape (16fps): {np.load(str(gt_depth)).shape}")
+print(f"GT depth shape (16fps aligned): {np.load(str(gt_depth)).shape}")
 artifact = run_gtdepth(clip, gt_depth, work_dir)
 
 print(f"Poses:      {artifact.poses_c2w.shape}")
 print(f"Intrinsics: {artifact.intrinsics.shape}")
-print(f"Scale:      mean={artifact.scale_per_frame.mean():.4f}  "
-      f"std={artifact.scale_per_frame.std():.4f}")
+print(f"Scale:      mean={artifact.scale_per_frame.mean():.4f}  std={artifact.scale_per_frame.std():.4f}")
 
-out_json.write_text(json.dumps({
+(work_dir / "pose_artifact.json").write_text(json.dumps({
     "poses_c2w":       artifact.poses_c2w.tolist(),
     "intrinsics":      artifact.intrinsics.tolist(),
     "scale_per_frame": artifact.scale_per_frame.tolist(),
 }))
-print(f"Pose artifact: {out_json}")
+print(f"Saved: ${ARTIFACT_JSON}")
 PYEOF
 else
-  echo "pose_artifact.json already exists, skipping VIPE"
+  echo "pose_artifact.json already exists, skipping VIPE."
 fi
 
-# ── Stage 5: caption（stub）─────────────────────────────────────────────────
+# ── Stage 5: Caption（stub）───────────────────────────────────────────────────
 echo ""
 echo "=== Stage 5: stub caption ==="
 CAPTION_FILE="${PREP_DIR}/caption.txt"
 if [ ! -f "${CAPTION_FILE}" ]; then
-  echo "Indoor synthetic scene from OmniWorld-Game with ground-truth depth." \
+  echo "Synthetic indoor scene rendered by OmniWorld-Game engine with ground-truth depth." \
     > "${CAPTION_FILE}"
 fi
 
@@ -163,9 +172,8 @@ from pathlib import Path
 scene_id   = "${SCENE_ID}"
 norm_video = Path("${NORM_VIDEO}")
 vipe_work  = Path("${VIPE_WORK}")
-gt_depth_p = Path("${GT_DEPTH}")
+norm_depth = Path("${NORM_DEPTH}")
 caption_p  = Path("${CAPTION_FILE}")
-shards_dir = Path("${SHARDS_DIR}")
 shard      = Path("${SHARD}")
 
 art = json.loads((vipe_work / "pose_artifact.json").read_text())
@@ -174,8 +182,9 @@ intrinsics_nvd = np.array(art["intrinsics"],       dtype=np.float32)
 scale_pf       = np.array(art["scale_per_frame"],  dtype=np.float32)
 T = len(poses_c2w)
 
-gt_depth = np.load(str(gt_depth_p)).astype(np.float32)
-gt_depth_ds = gt_depth[:T, ::4, ::4]
+# 2x 降采样深度图节省空间
+d_norm = np.load(str(norm_depth)).astype(np.float32)
+depth_ds = d_norm[:T, ::2, ::2]
 
 def add_npy(tf, name, arr):
     buf = io.BytesIO()
@@ -193,7 +202,7 @@ with tarfile.open(shard, "w") as tf:
     add_npy(tf, "poses_c2w.npy",        poses_c2w)
     add_npy(tf, "intrinsics_NVD.npy",   intrinsics_nvd)
     add_npy(tf, "scale_per_frame.npy",  scale_pf)
-    add_npy(tf, "depth_downsampled.npy", gt_depth_ds)
+    add_npy(tf, "depth_downsampled.npy", depth_ds)
 
     cbytes = caption_p.read_bytes()
     ti = tarfile.TarInfo(f"{scene_id}/caption.txt"); ti.size = len(cbytes)
@@ -219,13 +228,13 @@ python experiments/data_production_smoke/verify_and_eval.py \
 echo ""
 echo "========================================================================"
 echo " GT-depth E2E 完成 ✓"
-echo "  Scene:  ${SCENE_ID}"
-echo "  Shard:  ${SHARDS_DIR}/shard-000001.tar"
+echo "  Scene: ${SCENE_ID}"
+echo "  Shard: ${SHARDS_DIR}/shard-000001.tar"
 echo ""
-echo "下一步（SANA-WM 推理）："
-echo "  python experiments/data_production_smoke/run_sana_wm_inference.py \\"
+echo "下一步（pose 评估）："
+echo "  python experiments/data_production_smoke/verify_and_eval.py \\"
+echo "    --mode pose-eval \\"
 echo "    --shards-dir ${SHARDS_DIR} \\"
-echo "    --sana-dir /mnt/afs/davidwang/workspace/Sana \\"
-echo "    --output-dir /mnt/afs/davidwang/workspace/data/sana_wm_results_gtdepth \\"
-echo "    --sample-limit 1"
+echo "    --scenes-dir ${PREP_DIR} \\"
+echo "    --out-dir ${SHARDS_DIR}/eval_output"
 echo "========================================================================"

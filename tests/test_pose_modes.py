@@ -76,30 +76,53 @@ def test_default_mode_loads_artifact(monkeypatch, tmp_path: Path):
 
 # ---- GT-depth mode ---------------------------------------------------------
 def test_gtdepth_mode_recovers_scale(monkeypatch, tmp_path: Path):
-    pose_json = tmp_path / "pose.json"
+    """mode_gtdepth: GT depth=1, MoGe-2 depth=2 → scale_per_frame ≈ 2.0."""
     gt_depth = tmp_path / "gt_depth.npy"
-    moge_npy = tmp_path / "moge2.npy"
-    # fuse_metric_scale fits s such that s·d_gt ≈ d_moge (per App. B.1).
-    # GT = 1, MoGe = 2 ⇒ s* = Σ(w·a·b)/Σ(w·a²) = 2.0 with w=1/a.
     np.save(gt_depth, np.full((T, 90, 160), 1.0, dtype=np.float32))
-    np.save(moge_npy, np.full((T, 90, 160), 2.0, dtype=np.float32))
 
-    def fake_call(cmd: Sequence[str], **kw):
+    def fake_moge2(clip_path, moge_out, moge2_weights, fov_x_deg=60.0, device="cuda"):
+        # MoGe-2 returns 2.0 m everywhere → fuse_metric_scale gives s=2.0
+        depths = np.full((T, 90, 160), 2.0, dtype=np.float32)
+        np.save(str(moge_out), depths)
+        return depths
+
+    def fake_vipe(cmd: Sequence[str], **kw):
+        # VIPE writes pose/<stem>.npz + intrinsics/<stem>.npz
         cmd = list(cmd)
-        out_idx = cmd.index("--out") + 1
-        Path(cmd[out_idx]).write_text(json.dumps({
-            "poses_c2w": _eye_poses().tolist(),
-            "intrinsics_per_frame_NVD": _ok_intrinsics().tolist(),
-        }))
+        out_idx = cmd.index("--output") + 1
+        work_dir = Path(cmd[out_idx])
+        # cmd = ["vipe", "infer", "<clip>", "--output", "<work_dir>", "--pipeline", ...]
+        out_idx = cmd.index("--output")
+        stem = Path(cmd[out_idx - 1]).stem  # clip is the arg just before --output
 
+        pose_dir = work_dir / "pose"
+        pose_dir.mkdir(parents=True, exist_ok=True)
+        np.savez(pose_dir / f"{stem}.npz",
+                 data=_eye_poses(), inds=np.arange(T))
+
+        intr_dir = work_dir / "intrinsics"
+        intr_dir.mkdir(parents=True, exist_ok=True)
+        intr_raw = np.tile(
+            np.array([700.0, 700.0, 640.0, 360.0], dtype=np.float32), (T, 1)
+        )
+        np.savez(intr_dir / f"{stem}.npz",
+                 data=intr_raw, inds=np.arange(T))
+
+    monkeypatch.setenv("SANA_WM_MOGE2_WEIGHTS", "/fake/moge2")
+    monkeypatch.setattr(
+        "sana_wm_pipeline.stage02_pose.mode_gtdepth._run_moge2",
+        fake_moge2,
+    )
     monkeypatch.setattr(
         "sana_wm_pipeline.stage02_pose.mode_gtdepth.subprocess.check_call",
-        fake_call,
+        fake_vipe,
     )
+
     art = mode_gtdepth.run_gtdepth(Path("clip.mp4"), gt_depth, tmp_path)
     art.validate(T)
-    # Closed form on constants a=1, b=2 gives s=2.0 (identical across frames -> EMA stays at 2).
+    # fuse_metric_scale(d_gt=1, d_moge=2): closed-form s* = 2.0, EMA stays at 2.0
     assert art.scale_per_frame.mean() == pytest.approx(2.0, rel=1e-3)
+    assert art.intrinsics.shape == (T, 1, 4)
 
 
 # ---- GT-pose mode ----------------------------------------------------------

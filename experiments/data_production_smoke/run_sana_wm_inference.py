@@ -126,6 +126,8 @@ def run_inference(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     script = sana_dir / "inference_video_scripts" / "inference_sana_wm.py"
+    local_config = Path("/mnt/afs/davidwang/models/SANA-WM_bidirectional/config.yaml")
+
     cmd = [
         sys.executable,
         str(script),
@@ -139,14 +141,28 @@ def run_inference(
         "--name",        sample_id,
         "--step",        "60",
     ]
+    if local_config.exists():
+        cmd += [
+            "--config",            str(local_config),
+            "--refiner_root",      "/mnt/afs/davidwang/models/SANA-WM_bidirectional/refiner",
+            "--refiner_gemma_root","/mnt/afs/davidwang/models/SANA-WM_bidirectional/refiner/text_encoder",
+            "--offload_vae",
+            "--offload_refiner",
+        ]
     if model_path:
         cmd += ["--model_path", model_path]
 
+    import os as _os
+    env = _os.environ.copy()
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(sana_dir) + (":" + existing_pp if existing_pp else "")
+    env["DISABLE_XFORMERS"] = "1"
+
     log.info("Running inference for sample %s", sample_id)
     log.info("  cmd: %s", " ".join(cmd))
-    subprocess.check_call(cmd)
+    subprocess.check_call(cmd, env=env)
 
-    gen_mp4 = output_dir / f"{sample_id}.mp4"
+    gen_mp4 = output_dir / f"{sample_id}_generated.mp4"
     if not gen_mp4.exists():
         raise FileNotFoundError(f"Expected generated video not found: {gen_mp4}")
     return gen_mp4
@@ -299,7 +315,7 @@ def main() -> None:
 
     # Check for default model path
     model_path = args.model_path
-    default_model = Path("/mnt/afs/davidwang/models/sana_wm")
+    default_model = Path("/mnt/afs/davidwang/models/SANA-WM_bidirectional/dit/sana_wm_1600m_720p.safetensors")
     if model_path is None and default_model.exists():
         model_path = str(default_model)
         log.info("Found local model weights at %s", model_path)

@@ -236,7 +236,6 @@ def _compute_ate(
         pose_relation=metrics.PoseRelation.translation_part,
         align=True,
         correct_scale=True,
-        verbose=False,
     )
     return float(result.stats["rmse"])
 

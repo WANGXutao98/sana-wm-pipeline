@@ -58,14 +58,53 @@ echo ""
 echo "=== Stage 1: normalize video ==="
 NORM_VIDEO="${PREP_DIR}/normalized.mp4"
 if [ ! -f "${NORM_VIDEO}" ]; then
-  python -c "
+  python - <<PYEOF
 from pathlib import Path
-from sana_wm_pipeline.stage01_ingest.normalize import normalize_clip
-normalize_clip(Path('${VIDEO}'), Path('${NORM_VIDEO}'))
-print('Normalized:', '${NORM_VIDEO}')
-"
+from sana_wm_pipeline.stage01_ingest.normalize import normalize_video
+info = normalize_video(Path("${VIDEO}"), Path("${NORM_VIDEO}"))
+print(f"Normalized: {info.n_frames} frames @ {info.fps}fps  ({info.width}x{info.height})")
+PYEOF
 else
   echo "Already normalized: ${NORM_VIDEO}"
+fi
+
+# ── Stage 1b: 将 GT depth 重采样到归一化后帧率（16fps）──────────────────────
+# normalize 后视频帧数与原始帧率不同，GT depth 必须按时间戳对齐
+echo ""
+echo "=== Stage 1b: resample GT depth to 16fps ==="
+NORM_DEPTH="${PREP_DIR}/gt_depth_16fps.npy"
+ORIG_FPS_FILE="${PREP_DIR}/orig_fps.txt"
+if [ ! -f "${NORM_DEPTH}" ]; then
+  python - <<PYEOF
+import cv2, numpy as np
+from pathlib import Path
+
+# 归一化后的帧数
+cap = cv2.VideoCapture("${NORM_VIDEO}")
+T_norm = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+cap.release()
+
+# 原始帧数 / fps
+d_orig = np.load("${GT_DEPTH}")  # (T_orig, H, W)
+T_orig = len(d_orig)
+orig_fps_file = Path("${ORIG_FPS_FILE}")
+orig_fps = float(orig_fps_file.read_text().strip()) if orig_fps_file.exists() else 30.0
+
+# 按时间戳映射：norm 帧 i (16fps) → orig 帧 j
+# j = round(i / 16.0 * orig_fps)
+target_fps = 16.0
+t_norm = np.arange(T_norm) / target_fps         # 归一化帧时间戳 (秒)
+t_orig = np.arange(T_orig) / orig_fps            # 原始帧时间戳 (秒)
+indices = np.round(np.interp(t_norm, t_orig, np.arange(T_orig))).astype(int)
+indices = np.clip(indices, 0, T_orig - 1)
+d_resampled = d_orig[indices]                    # (T_norm, H, W)
+
+np.save("${NORM_DEPTH}", d_resampled)
+print(f"GT depth resampled: {T_orig} frames@{orig_fps}fps -> {T_norm} frames@{target_fps}fps")
+print(f"Saved: ${NORM_DEPTH}  shape={d_resampled.shape}")
+PYEOF
+else
+  echo "Already resampled: ${NORM_DEPTH}"
 fi
 
 # ── Stage 2: GT-depth VIPE SLAM ─────────────────────────────────────────────
@@ -74,17 +113,17 @@ echo "=== Stage 2: GT-depth VIPE SLAM (MoGe-2 + VIPE) ==="
 ARTIFACT_JSON="${VIPE_WORK}/pose_artifact.json"
 
 if [ ! -f "${ARTIFACT_JSON}" ]; then
-  python - <<'PYEOF'
-import json, numpy as np, os, sys
+  python - <<PYEOF
+import json, numpy as np
 from pathlib import Path
-
-clip      = Path(os.environ['NORM_VIDEO'])
-gt_depth  = Path(os.environ['GT_DEPTH'])
-work_dir  = Path(os.environ['VIPE_WORK'])
-out_json  = work_dir / 'pose_artifact.json'
-
-print(f"GT depth shape: {np.load(str(gt_depth)).shape}")
 from sana_wm_pipeline.stage02_pose.mode_gtdepth import run_gtdepth
+
+clip     = Path("${NORM_VIDEO}")
+gt_depth = Path("${NORM_DEPTH}")   # 16fps 对齐后的 GT depth
+work_dir = Path("${VIPE_WORK}")
+out_json = work_dir / "pose_artifact.json"
+
+print(f"GT depth shape (16fps): {np.load(str(gt_depth)).shape}")
 artifact = run_gtdepth(clip, gt_depth, work_dir)
 
 print(f"Poses:      {artifact.poses_c2w.shape}")
@@ -93,17 +132,15 @@ print(f"Scale:      mean={artifact.scale_per_frame.mean():.4f}  "
       f"std={artifact.scale_per_frame.std():.4f}")
 
 out_json.write_text(json.dumps({
-    'poses_c2w':      artifact.poses_c2w.tolist(),
-    'intrinsics':     artifact.intrinsics.tolist(),
-    'scale_per_frame': artifact.scale_per_frame.tolist(),
+    "poses_c2w":       artifact.poses_c2w.tolist(),
+    "intrinsics":      artifact.intrinsics.tolist(),
+    "scale_per_frame": artifact.scale_per_frame.tolist(),
 }))
 print(f"Pose artifact: {out_json}")
 PYEOF
 else
   echo "pose_artifact.json already exists, skipping VIPE"
 fi
-
-export NORM_VIDEO GT_DEPTH VIPE_WORK  # needed by heredoc above
 
 # ── Stage 5: caption（stub）─────────────────────────────────────────────────
 echo ""

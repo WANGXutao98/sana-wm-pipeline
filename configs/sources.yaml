@@ -82,3 +82,25 @@ sources:
 # All counts trace to paper Table 1 (§4); sum should equal 212975
 totals:
   total_clips: 212975
+
+# ── External pre-packed WDS corpus (not counted in paper Table 1 totals) ──
+# 实测 2026-06-14：8 子集 / 475,954 样本 / 1,353 shards。
+# 每样本 = {key}.mp4 + {key}.camera.npz(per_frame_camera_npz_v1)；caption 在 index.jsonl。
+external_corpora:
+  jdvbbfb_v3_full:
+    type: huggingface_gated
+    repo_id: junchaoh-cs/jdvbbfb-v3-full
+    pose_mode: default                      # 用本管线 Pi3X+MoGe-2+VIPE 重标注
+    groups:
+      - {name: wds-DL3DV-ALL-2K,        samples: 9993,   shards: 87,  res: 1920x1080, fps: 30}
+      - {name: wds-OmniWorld-Game,      samples: 6576,   shards: 65,  res: 1280x720,  fps: 24}
+      - {name: wds-SpatialVID-hq,       samples: 365362, shards: 714, res: 1280x720,  fps: 59.94}
+      - {name: wds-sekai-real-walking-hq, samples: 18208, shards: 287, res: 1280x720, fps: 30}
+      - {name: wds-sekai-game-walking,  samples: 1618,   shards: 43,  res: 1920x1080, fps: 30}
+      - {name: wds-sekai-game-drone,    samples: 932,    shards: 5,   res: 1920x1080, fps: 30}
+      - {name: wds-RealEstate10K-360p,  samples: 73165,  shards: 143, res: 640x360,   fps: 30}
+      - {name: wds-Context-as-Memory,   samples: 100,    shards: 9,   res: 640x360,   fps: 30}
+    sample_layout:
+      video_member: "{key}.mp4"
+      camera_member: "{key}.camera.npz"     # c2w/w2c/K_px + vipe_* refs
+      caption: "index.jsonl → manifest.prompt.text"

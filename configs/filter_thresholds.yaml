@@ -38,6 +38,37 @@ per_source:
     vlm_entity:       [0, 25]
     vlm_quality:      [0.5, 1.5]
 
+  # RealEstate10K-360p: 真实室内/建筑漫游，与 DL3DV 同类严格阈值
+  RealEstate10K:
+    vmaf_motion:      [0.5, 50]
+    unimatch_flow:    [3, 80]
+    dover:            [0.40, 1.0]
+    color_saturation: [0, 180]
+    scene_cuts_max:   1
+    vlm_entity:       null
+    vlm_quality:      null
+
+  # Sekai 游戏-航拍：基线大，允许较大光流幅值；DOVER 要求放宽
+  Sekai_Game_Drone:
+    vmaf_motion:      [0.5, 100]
+    unimatch_flow:    [3, 150]
+    dover:            [0.25, 1.0]
+    color_saturation: null
+    scene_cuts_max:   null
+    vlm_entity:       [0, 10]
+    vlm_quality:      [0.5, 1.5]
+
+  # Sekai 游戏-步行：与 OmniWorld 同量级（第三人称步行视角）
+  Sekai_Game_Walking:
+    vmaf_motion:      [0.5, 50]
+    unimatch_flow:    [3, 80]
+    dover:            [0.25, 1.0]
+    color_saturation: null
+    scene_cuts_max:   null
+    vlm_entity:       [0, 10]
+    vlm_quality:      [0.5, 1.5]
+
+  # MiraData: 本批次未生产，保留条目供后续接入
   MiraData:
     vmaf_motion:      [0.5, 50]
     unimatch_flow:    [3, 80]

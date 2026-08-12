@@ -1,0 +1,400 @@
+# Progress Log
+
+---
+
+## 2026-06-25 会话 9 — 实现计划撰写完成 ✅
+
+### 完成事项
+
+#### QC 系统实现计划（Stage 1+2+3 完整版）✅
+
+- 文件：`docs/superpowers/plans/2026-06-25-qc-system-complete.md`
+- 覆盖 Task 1-7（metrics.py / group_config.py / stage1_fast.py / stage2_deep.py / stage3_gpu.py / report.py / run_stage3_cmcc.py）
+- 修正旧计划（2026-06-21）缺口：max_jumps_fail=50（游戏组）、3 个新 group、Stage 3 完整实现、颜色饱和度检查、摄像机词检查、黑帧比例、CMCC 48-GPU 启动器
+- Qwen 权重 + 数据备份已在 CMCC 完成，无需下载任务
+
+---
+
+## 2026-06-25 会话 8 — QC 系统方案设计完成，全部决策落地
+
+### 背景
+
+批量生产已全部完成（7 个 group，产出存于 CMCC externalstorage）。本会话聚焦于产出数据的质检方案设计：① 审阅 testdata 4 条 OmniWorld-Game 样本；② 设计两阶段+第三阶段 QC 系统；③ 精读论文附录 B.3 补充论文规定的过滤指标；④ 进行决策评审，确认全部 5 个待定问题。
+
+### 完成事项
+
+#### 1. testdata 样本审阅（4 条 OmniWorld-Game）✅
+
+抽检路径：`/mnt/afs/davidwang/workspace/sana_wm_pipeline/testdata/`
+主要发现：
+- 所有样本 SO(3) 合法（det=1.0，正交误差<1e-5）✅
+- 内参主点完美居中（cx/cy 偏移=0px）✅
+- scale 全部为 1.0（Default 模式设计行为）✅
+- 轨迹跳变（>50cm）：5~12 次/样本，属游戏场景正常范围
+- 轨迹坐标范围达 296m（游戏世界尺度），为正常现象
+- 同一游戏场景的多个时间片段共用同一条 caption（design behavior）
+- Caption 含弱框架词（"camera stays behind"/"third-person view"），**不是**论文禁止的强动作词
+
+#### 2. QC 方案设计文档 v1.0 → v2.0 → v2.1 ✅
+
+三次版本迭代：
+- **v1.0**（`a98f9f3`）：基础两阶段方案，通俗易懂版，面向多方评审
+- **v2.0**（`ae28797`）：精读论文后补充 App.B.3 完整过滤体系（11 项指标），新增可选第三阶段
+- **v2.1**（`3897249`）：整合全部决策结论，Stage 3 改为必做，补充 3 个新数据集配置
+
+文档路径：`docs/QC_REVIEW_DESIGN.md`
+
+#### 3. 实施计划文档 ✅（已写好，待实施）
+
+路径：`docs/superpowers/plans/2026-06-21-output-qc-system.md`
+内容：6 个模块的完整 TDD 实施计划（含代码框架）
+
+提交记录：
+```
+3897249 docs(qc): v2.1 整合全部决策结论 + 补充3个新数据集配置
+ae28797 docs(qc): v2.0 整合论文 App.B.3 完整过滤体系
+a98f9f3 docs(qc): add 面向多方评审的通俗版质检方案文档
+36284ce docs(qc): add 两阶段输出质检系统实施计划
+```
+
+#### 4. filter_thresholds.yaml 更新 ✅
+
+新增 3 个 CMCC 实际产出但原配置缺失的数据集：
+- `RealEstate10K`：真实室内，严格阈值
+- `Sekai_Game_Drone`：游戏航拍，宽松（unimatch_flow ≤ 150）
+- `Sekai_Game_Walking`：游戏步行，中等（同 OmniWorld 级别）
+
+### 全部已确认决策（2026-06-25）
+
+| 问题 | 决策 | 理由 |
+|---|---|---|
+| Stage 3 是否做 | ✅ 必做 | 48 H100，全量约 6~7h，资源充足 |
+| Caption 摄像机词 | 两级检测 + Qwen 捆绑改写 | 弱框架词可接受，强动作词需改写但不丢弃 |
+| 游戏跳变上限 | max_jumps_fail=50 | 约 5% 帧率比例，游戏数据价值高 |
+| MiraData | 本批不生产，排除 | 配置保留供后续 |
+| VMAF Motion | 取消，用 UniMatch 替代 | 规避 libvmaf 依赖，物理等价 |
+| Qwen 模型 | **Qwen3.5-27B**（已确认支持图像输入）| 论文同系列，27B 质量优于 7B |
+| Caption 改写架构 | sidecar JSONL，不动原始 tar | 可回溯，原始数据完整保留 |
+
+### 新发现：CMCC 产出有 3 个原配置缺失的数据集
+
+批量生产实际产出 7 个 group（原计划只有 4 个有配置）：
+- 新增：`wds-RealEstate10K-360p`、`wds-sekai-game-drone`、`wds-sekai-game-walking`
+- 已在 `configs/filter_thresholds.yaml` 补充
+- 实施 QC 代码时需同步更新 `group_config.py` 中的 GroupConfig 注册表
+
+### 待办（下次会话）
+
+1. **备份原始数据**：在 CMCC 上 rsync jdvbbfb_output 到 filestorage 或生成 md5 清单
+2. **Docker 补包**：准备 av/scenedetect/dover/UniMatch/Qwen3.5-27B 权重（见 task_plan.md 清单）
+3. **实施阶段 12**：开始 QC 代码实施（参考 `docs/superpowers/plans/2026-06-21-output-qc-system.md`）
+4. **Qwen3.5-27B 下载**：在 CMCC ModelScope 下载，存到 filestorage（~55GB）
+
+---
+
+## 2026-06-16 会话 7（历史）— 4节点资源新增：多任务组互斥分配 + 镜像不可重发布的脚本同步方案
+
+### 背景
+会话6交付 `launch_all_nodes.sh` 后，6节点任务尚未实跑，CMCC 又新增一组独立资源（4节点×8卡，独立 hostfile，独立 master，hostname job-id 前缀不同）。用户提出两个新问题：① 6节点和4节点会不会重复处理同一批 group；② 镜像不能重新发布（重发布会导致 GPU 资源被抢占），改过的 `launch_all_nodes.sh`/`run_groups_sequential.sh` 怎么同步到所有节点。
+
+### 完成事项
+
+#### 1. `run_groups_sequential.sh` + `launch_all_nodes.sh` 新增 `--groups` 显式覆盖参数 ✅
+推演结论：worker 输出目录命名 `w{NODE_RANK*8+LOCAL_GPU:03d}` 不含任何 job 标识，两组节点各自独立跑同一个 group 时，各自的 worker 池本身就是该 group 全部分片的完整覆盖（不是部分重叠），会整组重复处理且在 worker id 0~31 的输出目录上发生真实的并发写冲突（两个独立进程的 `ShardWriter` 同时 `tarfile.open(path,"w")` 互相截断）。`.done` 标记只能保护已完成分片，保护不了正在并发处理的分片。
+
+修复：`run_groups_sequential.sh` 新增 `--groups G1,G2,...`，跳过 `BATCH1_GROUPS`/"剩余全部自动发现"逻辑，改为显式指定本次处理的 group 列表；`launch_all_nodes.sh` 透传该参数。验证：bash -n 语法检查 + 三种参数路径（`--groups`/`--batch1-only`/无flag）模拟测试全部正确。
+
+最终用户采用的方案（两边都还未启动，直接在首次启动时用互斥 `--groups` 锁死，比"先查进度再分配"更干净）：
+- 6节点：`--groups wds-sekai-real-walking-hq`
+- 4节点：`--groups wds-DL3DV-ALL-2K,wds-SpatialVID-hq`
+
+提醒：① `--groups` 模式下跑完指定的 group 就退出，不会自动接续"剩余全部"，下一批需要手动重新分配再发起；② `wds-SpatialVID-hq` 在 `findings.md` F-5 里没有像 DL3DV/sekai 一样确认过存在性和 shard 数，建议先 `ls $DATA_ROOT/wds-SpatialVID-hq/shards` 确认。
+
+#### 2. 新增 `experiments/batch_production/sync_to_nodes.sh` ✅
+背景：用户不能重新打包发布镜像（会触发 GPU 资源被抢占重新排队），但 `launch_all_nodes.sh` 只需要在每组节点各自的 master 上有；`run_groups_sequential.sh`（及其余 batch_production 脚本）需要在全部 10 个节点（6+4）的本地路径上都更新到最新版本。手动逐节点 vim 改风险高（容易漏改/改错，且后续这套脚本还会继续迭代）。
+
+实现：复用 `keep_all_gpu.sh`/`launch_all_nodes.sh` 同款"读 hostfile → 遍历 SSH"模式，但改成 `scp` 整个 `batch_production/*.sh *.py` 到每个节点的 `$PROJ_DIR/experiments/batch_production/`；支持一次传入多份 hostfile（一条命令同步两组节点的全部机器）；单节点失败不中断整体，最后汇总失败列表，脚本可重复执行幂等覆盖。
+
+用法：
+```bash
+bash sync_to_nodes.sh hostfile_6node hostfile_4node
+```
+前提：要从一台已经拿到本次改动（AFS→CMCC 手动传过去）且能 SSH root 免密到全部10节点的机器上执行。
+
+验证：bash -n 语法检查通过；本地模拟两份 hostfile（6行+4行）遍历，10个节点全部正确识别。
+
+### 待办
+- 用户实际执行：先把 `launch_all_nodes.sh`/`run_groups_sequential.sh`/`sync_to_nodes.sh` 改动同步到 CMCC 任意一台节点，再用 `sync_to_nodes.sh` 分发到全部10节点
+- 确认 `wds-SpatialVID-hq` 在 CMCC `$DATA_ROOT` 下确实存在且有 shard 数据
+- 6节点 `--groups wds-sekai-real-walking-hq` + 4节点 `--groups wds-DL3DV-ALL-2K,wds-SpatialVID-hq` 实跑验证
+- 批次1三个 group 跑完后，需要手动规划下一批 `--groups` 分配（剩余全部 group 列表，按6:4=48:32算力比例切分）
+
+### 2026-06-16 续：6节点首次实跑 `--check-only` 暴露 `launch_all_nodes.sh` 自身 bug，已修复
+
+用户按方案跑 `--groups wds-sekai-real-walking-hq <hostfile_6node>`，预检阶段 6 个节点里 5 个报同样的错：
+```
+ImportError: .../vipe_ext.*.so: undefined symbol: _ZNK5torch8autograd4Node4nameB5cxx11Ev
+```
+解码后是 `torch::autograd::Node::name[abi:cxx11]() const`——和 `findings.md` F-0 同一类 libtorch ABI/LD_LIBRARY_PATH 问题。
+
+**根因定位（确认是 `launch_all_nodes.sh` 自身的 bug，不是 CMCC 环境问题）：** 预检阶段的 SSH 远程命令直接调用 `$ENV_DIR/bin/python` 测试 import，但忘了在远程 shell 里重新 `source config.sh`（SSH 开的是全新远程 shell，master 本地 source 过的环境变量不会被继承）。真正的批量生产路径（`run_groups_sequential.sh`→`source config.sh`）本身没问题，只有这个预检脚本漏了激活步骤。
+
+**修复：** 在 `launch_all_nodes.sh` 预检的远程命令最前面加 `source '$PROJ_DIR/experiments/batch_production/config.sh'`。另外给 `launch_all_nodes.sh`/`sync_to_nodes.sh` 的 hostfile 解析都加了 `line="${line%$'\r'}"` 防御 CRLF 行尾（不确定是否触发过，属于顺手加固）。已用假路径模拟插值后的远程命令字符串单独过 `bash -n`，确认转义/引号嵌套无误。
+
+**另一个现象（rank 0 SSH 报 "connect to host 0.0.0.67"）：** 怀疑是这条用户消息在传输/渲染过程中的展示问题，不是脚本真实 bug——证据：同一条消息里其他纯程序输出（`.so` 文件名 `x8664`、路径 `thirdparty`/`davidwork` 等）也都丢失了下划线，说明传输链路本身在篡改文本，不只是用户手敲的命令受影响。已建议用户用 `od -c`/`cat -A` 自查 hostfile 第1行是否真的有隐藏字符，目前未实锤是真实文件问题。
+
+**待办：** 用户重新同步这两个文件后再跑一次 `--check-only`，确认 import 检查通过 + rank 0 的 hostname 显示正常。
+
+### 2026-06-16 续：第二轮报错 `CUDA 不可用`，先误判为驱动版本不兼容，后被用户用反证纠正
+
+vipe_ext 问题修复后，预检又报 `torch.cuda.is_available()==False`，警告显示"driver too old (found version 12040)"。
+
+**第一次诊断（错误结论，已撤回）：** 用 `nvidia-smi --query-gpu=driver_version` 测出这批新节点驱动是 550.90.12，对照 NVIDIA 驱动/CUDA 兼容表（550.x 分支最高支持 CUDA 12.4），和 env 里 torch(cu130) 需要的驱动版本（580.x+）确实不匹配，"12040" 数字也分毫不差，于是错误地得出"这批新节点驱动太老，和 cu130 torch 根本不兼容"的结论，准备建议用户找运维升级驱动或重建 cu124 环境。
+
+**用户用反证推翻：** 用户直接在子节点上手动跑 `launch_single_node.sh`（不经过 `launch_all_nodes.sh`）成功——同一块物理驱动、同一个 torch(cu130) 环境，真实跑通了 GPU 计算。这证明驱动和 torch 并不是真的不兼容，问题必须在我们自己的脚本里。
+
+**重新检查代码，定位真正根因：** `grep CUDA_VISIBLE_DEVICES experiments/batch_production/*.sh *.py` 发现只有 `launch_single_node.sh:40` 显式设置了 `CUDA_VISIBLE_DEVICES=$LOCAL_GPU`，`launch_all_nodes.sh` 的预检命令从头到尾没碰这个变量。而诊断时测出的 `CUDA_VISIBLE_DEVICES(交互式)=`（空字符串）——NVIDIA 官方文档：该变量显式设为空字符串 = "0张卡可见"，和"完全不设置=默认全部可见"是两种不同状态，`echo $VAR` 区分不出来。这批节点/镜像环境本身就把这个变量预置成了空字符串（`config.sh`/`activate_sana_wm.sh` 都没有这一行，是节点环境带的），`launch_single_node.sh` 因为自己显式覆盖了所以没事，预检脚本什么都没设直接继承了"0卡可见"的状态。
+
+**修复：** `launch_all_nodes.sh` 预检命令里 `source config.sh` 之后加一行 `unset CUDA_VISIBLE_DEVICES`。已 `bash -n` 验证语法。
+
+**教训记录：** 看到一个数字（12040）刚好对上某个官方版本对照表就直接下结论，没有先排除"我们自己代码漏了什么"这个更基础的可能性——用户一句"我直接跑 launch_single_node.sh 是好的"就把整个驱动不兼容假设否定了。以后遇到"换了一种启动方式就报错"的情况，应该先用 `diff`/逐行核对两种启动路径设置了哪些环境变量的差异，而不是先去查外部兼容性表。
+
+**待办：** 用户重新同步 `launch_all_nodes.sh` 后用 `--check-only` 验证这次是否真的解决；compat（CUDA forward-compat 包）检查目前看大概率不需要了，先验证这个修复。
+
+---
+
+## 2026-06-16 会话 6（历史）— 6 节点多节点编排脚本 `launch_all_nodes.sh`
+
+### 背景
+会话5的校验8（单节点8卡）已在 CMCC 上跑通并抽样质检 PASSED（F-9）。用户随后获得 6 节点（1 master+5 worker，各8卡）资源，运维提供两份参考脚本：`keep_all_gpu.sh`（遍历 hostfile SSH 拉起 GPU 防回收保活进程 `gg`）+ `detect_gpu.py`（从平台 `VC_MASTER_*_HOSTS`/`VC_WORKER_*_HOSTS` 环境变量生成 hostfile，6行，1 master+5 worker，各 `slots=8`）。
+
+### 关键判断
+读完两份参考脚本后确认：这个 CMCC 平台是自研 "VC" 调度器，**不会**像 SLURM/torchrun 那样给每个节点自动注入 `RANK`/`SLURM_NODEID`/`OMPI_COMM_WORLD_RANK`——`launch_multi_node.sh` 里写的那条环境变量 fallback 链在这个平台上永远落到默认值 `0`/`1`（之前单节点校验能跑通正是因为默认值恰好就是正确答案）。真正的编排方式是：在 master 节点上读 hostfile，主动 SSH 进每台机器显式派发 rank——这正是运维 `keep_all_gpu.sh` 已经在做的事。
+
+### 完成事项
+
+#### 方案讨论（先解释后动手）
+按用户要求，先逐文件读完 `config.sh`/`launch_multi_node.sh`/`launch_single_node.sh`/`run_groups_sequential.sh`/`run_worker.py`/`watch_progress.sh`，确认现有 5 个脚本的分片分配逻辑（`GLOBAL_WORKER=NODE_RANK*8+LOCAL_GPU`，按全局分片下标 round-robin）本来就是节点数无关的纯函数式设计，**不需要改**；`watch_progress.sh` 按 glob 自动汇总所有节点日志，**不需要改**。唯一缺的是"谁来给每个节点报 rank"——给用户讲清楚方案后再动手写。
+
+#### 新增 `experiments/batch_production/launch_all_nodes.sh` ✅
+```bash
+bash experiments/batch_production/launch_all_nodes.sh [--batch1-only] [--check-only] <HOSTFILE>
+```
+- rank = hostfile 行号（从0开始），`NUM_NODES` = hostfile 行数，与具体哪台物理机拿到哪个 rank 无关（分片去重靠 `progress/*.done`，按全局分片下标而非 rank，换一批机器跑也不会丢数据/重复）
+- **阶段1 预检**：SSH 进每个节点，检查 `ENV_DIR/bin/python` 存在、`import torch/vipe_ext/vipe/sana_wm_pipeline` 成功且 GPU 数与 hostfile `slots=` 一致、`DATA_ROOT` 存在、`OUT_BASE` 可写；任一节点失败则整体中止退出，不拉真实任务
+- **阶段2 拉起**：跳过 `launch_multi_node.sh`（其环境变量自动探测在此平台用不上），直接 SSH 执行 `nohup bash run_groups_sequential.sh [--batch1-only] <rank> <NUM_NODES> > driver_log 2>&1 &`；启动前用 `pgrep -f 'run_groups_sequential.sh|run_worker.py'` 检查该节点是否已有任务在跑，避免误重跑造成同一 worker 输出目录被两个进程同时写
+- driver 日志写到共享存储 `$OUT_BASE/driver_logs/node{rank}_driver.log`
+
+#### 验证 ✅
+- `bash -n` 语法检查通过
+- 用用户实际提供的 6 行 hostfile 样例本地测试解析逻辑：`NUM_NODES=6`，hostname/slots 提取、rank 0~5 分配全部正确（worker-4→rank0, master-0→rank1, worker-3→rank2, worker-2→rank3, worker-1→rank4, worker-0→rank5，顺序无关只要本次运行全程一致即可）
+
+#### 文档同步 ✅
+`task_plan.md` 新增"多节点扩容（6节点×8卡=48 worker）"章节，记录方案结论+待验证风险点+建议执行顺序。
+
+### 待办（用户在 CMCC 上手动验证，未自动验证）
+1. `/root/work/david_work`（conda env+vipe_ext+代码+权重）是否 6 节点镜像一致——建议先 `launch_all_nodes.sh --check-only` 跑一遍，已内置该检查
+2. `DATA_ROOT`/`OUT_BASE` 是否 6 节点共享同一份 externalstorage 挂载——同样被 `--check-only` 覆盖
+3. 运维 `gg` 保活进程（每卡尝试抓 24GB）是否会和真实 worker 抢显存——`gg` 是运维二进制看不到源码，建议第一次跑时用 `nvidia-smi` 观察几分钟而非默认信任
+4. master→5个worker 的 root SSH 免密是否已打通——运维脚本默认成立，理论上平台层已配置好
+5. 实际跑 `launch_all_nodes.sh --batch1-only`，确认 48 worker 都能正常起、`watch_progress.sh` 能汇总看到全部 6 节点日志
+
+---
+
+## 2026-06-16 会话 5（历史）— CMCC 批量生产脚本开发完成
+
+### 背景
+开发机两个数据集（DL3DV、Sekai）冒烟测试已通过，用户决定手动打包当前开发机环境为镜像提交至 CMCC 算力平台（5 节点 × 8 GPU），开始 `jdvbbfb-v3-full` 全量批量生产。本会话通过 `/superpowers:writing-plans` 产出完整方案，再用 `/superpowers:subagent-driven-development` 逐任务分派 subagent 实现 + 双阶段评审（spec compliance → code quality）落地。
+
+### 完成事项
+
+#### 1. normalize.py 提速优化 ✅
+`stage01_ingest/normalize.py` 的 ffmpeg 归一化命令新增 `-threads 4`。
+确认：`-threads` 只影响编解码并行度，不影响 CRF 编码的画质目标，对生成质量零影响，预期归一化提速 30-50%。
+
+#### 2. CMCC 批量生产脚本套件（`experiments/batch_production/`）✅
+
+全部 6 个文件，均经过 spec-compliance review + code-quality review 双阶段评审通过：
+
+| 文件 | 作用 |
+|------|------|
+| `config.sh` | 集中管理路径变量、环境激活、优先级数据集组（BATCH1_GROUPS）|
+| `run_worker.py` | 单 GPU worker：读取分配到的 input shard，逐样本跑 normalize→pose→pack 三段管线，写 `.done` 进度标记 |
+| `launch_single_node.sh` | 单节点 8 卡启动：round-robin 分片下标分配，拉起 8 个后台 worker，等待汇总失败数 |
+| `launch_multi_node.sh` | 多节点包装：从 `RANK`/`WORLD_SIZE`（含 SLURM/OMPI fallback）解析节点号后委托给 `launch_single_node.sh` |
+| `run_groups_sequential.sh` | 按优先级串行处理多个数据集 group（① sekai ② DL3DV ③ SpatialVID-hq → 剩余全部），单 group 失败不影响后续 |
+| `watch_progress.sh` | 人工实时监控面板：shard 进度 / 样本 ok-fail 汇总 / GPU 状态 / 各 worker 日志尾部 |
+
+**GPU↔分片分配规则（embarrassingly parallel，无需 NCCL/torchrun）：**
+全局 worker 编号 `GLOBAL_WORKER = NODE_RANK×8 + LOCAL_GPU`，worker `W` 负责 input shard 下标 `{W, W+GLOBAL_WORKERS, W+2×GLOBAL_WORKERS, ...}`（`GLOBAL_WORKERS = NUM_NODES×8`）。每个 worker 独立输出到 `out_base/<group>/w{id:03d}/`，天然无锁、无竞争。
+
+**双层 resume 机制：**
+- shard 级：`progress/{shard_idx:06d}.done` JSON 标记（含 n_ok/n_fail/耗时），脚本重跑自动跳过已完成 shard
+- 样本级（已有）：`mode_default.py` 的 `_depth_cache.npz` resume，OOM 重试时跳过已算完的 Pi3X 步骤
+
+#### 3. Code-quality review 发现并修复的问题 ✅
+
+复盘环节（本会话过程中自我纠正：Task 1-6 起初只做了 spec review 就标记完成，跳过了 code-quality review 这一强制阶段；已补做并修复发现的问题）：
+
+- **Critical（已修复）：** `launch_single_node.sh` 末尾 `DONE_CNT=$(ls ...*.done | wc -l)` 在 `set -euo pipefail` 下，当 `progress/` 为空（典型场景：所有 worker 在第一个 shard 就失败)会因 `ls` 返回非 0 而提前退出整脚本，导致汇总信息丢失。修复：追加 `|| true`。
+- **Important（已修复）：** worker 级失败汇总不可见——原先只有 worker 整体 0 ok 才算失败，单个 worker 内部分样本失败不会反映在任何启动器日志里。修复：`launch_single_node.sh` 新增 `N_OK_TOTAL`/`N_FAIL_TOTAL` 聚合（grep+awk 读取所有 `.done` 文件求和），打印进最终汇总行；`watch_progress.sh` 同步展示。
+- **Important（已添加注释）：** `launch_single_node.sh` 的 round-robin 分片下标假设 shard 文件名是稠密 0 起始零填充编号——已加注释明确该假设，链接到 `run_worker.py:_shard_basename`。
+- **Minor：** `watch_progress.sh` 故意不开 `set -e`（无限轮询循环，单次取数失败不该杀死整个监控会话）——已加注释说明意图，避免未来被"统一开 -e"误改。
+
+### CMCC 部署清单（用户需手动操作）
+
+1. ~~`mode_default.py` OOM 修复~~ — 用户已手动复制完成
+2. 将 `experiments/batch_production/` 整个目录复制到 CMCC 机器 `$PROJ_DIR/experiments/batch_production/`
+3. `stage01_ingest/normalize.py` 的 `-threads 4` 改动需同步（如果 CMCC 上是独立 checkout，需要手动改或整文件覆盖）
+4. 单节点验证：`bash experiments/batch_production/launch_single_node.sh wds-sekai-real-walking-hq`
+5. 验证通过后多节点：`RANK=$i WORLD_SIZE=5 bash experiments/batch_production/launch_multi_node.sh wds-sekai-real-walking-hq`（每节点设置对应 RANK）
+6. 全量批次：`bash experiments/batch_production/run_groups_sequential.sh`（默认跑完优先 3 个 group 后接剩余全部；加 `--batch1-only` 只跑前 3 个）
+7. 监控：`bash experiments/batch_production/watch_progress.sh <group>`
+
+### CMCC 实地校验进度（2026-06-16，本会话延续）
+
+用户已在 CMCC 机器上按上面"部署清单"逐条执行校验（清单是用户自己整理的 8 项，与本文档"部署清单"略有不同编号，对应关系见下）：
+
+| 校验项 | 内容 | 状态 |
+|--------|------|------|
+| 校验1 | 基础环境（torch/vipe_ext/vipe/sana_wm_pipeline import）| ✅ PASSED |
+| 校验2 | GPU 数量与显存（8×H100 80GB）| ✅ PASSED |
+| 校验3 | 模型权重（Pi3X 5.1GB / MoGe-2 1.3GB 均可加载）| ✅ PASSED |
+| 校验4 | 数据目录结构（jdvbbfb-v3-full 3 个优先 group 均存在）| ✅ PASSED |
+| 校验5 | filestorage 可写性 + /tmp 空间 | ✅ PASSED |
+| 校验6 | config.sh 加载正常 | ✅ PASSED |
+| 校验7 | 单 worker 端到端冒烟（已用开发机 Sekai Smoke 替代，跳过）| ✅ PASSED |
+| 校验8 | 单节点 8 卡并发启动测试 | 🔄 进行中（见下） |
+
+**校验8 详情：**
+- 已执行 `bash experiments/batch_production/launch_single_node.sh wds-sekai-real-walking-hq`（不带 NODE_RANK/NUM_NODES，默认单节点）
+- 运行约 30 分钟后用户反馈：8 个 worker 日志文件全部为空，但 `w000/shard-000000.tar`、`w007/shard-000000.tar` 已存在 → 排查后确认是**两个假阳性现象叠加**，不是故障，详见 `findings.md` F-8：
+  1. Python stdout 重定向到文件后默认块缓冲，`print()` 没有及时 flush
+  2. `ShardWriter.__init__` 会立即创建空 tar 文件，存在不代表样本已写完
+- 已确认：项目自己的校验清单写的单样本端到端预估耗时 45-90 分钟，30 分钟无输出在预期内
+- 给出的实时存活判断方法：`ps -eo pid,etime,pcpu,cmd | grep run_worker.py` + `nvidia-smi --query-gpu=...`
+- **已修复（仅 AFS，CMCC 待手动同步）：** `launch_single_node.sh` 的 python 调用加了 `-u` / `PYTHONUNBUFFERED=1`，下次重新启动（DL3DV / SpatialVID-hq 等）会生效；当前这次 sekai 任务不受影响，无需中断
+- 当前 CMCC 上跑的这次 sekai 8 卡任务**本身就是批次1优先级第①位的正式生产**，如校验通过用户计划直接让它跑完，而不是跑完验证再重新提交
+
+### 校验8 抽样质检结果（2026-06-16，本会话延续）
+
+用户从 CMCC 取回两个运行中 worker 的 shard 快照，copy 到 AFS：`shard-000000-w001.tar`（86.4MB）、`shard-000000-w005.tar`（111.4MB）。逐字段核验结果：
+
+- 两个 tar 各含 2 个样本，第1个完整（6文件），第2个缺 caption+meta（4文件）——确认是 worker 仍在写第2个样本时的快照，非 bug（详见 `findings.md` F-9，呼应 F-8）
+- **2 个完整样本全部 PASS**：poses_c2w det(R)=1.0、正交误差~1e-6、首帧≈单位矩阵；intrinsics 主点完美居中；scale 全1.0；caption 高质量；video 用 ffprobe 实测 960帧@16fps 1280×720，与 npy 数组 T 完全对齐
+- 帧数 960（非 schema.py 标注的论文值961）确认是 `run_worker.py` 故意传 `strict_frames=False` 的预期行为，不是异常
+- **结论：校验8 已确认产出真实合格训练样本，不是空 tar 假象**，质量与此前 DL3DV/Sekai smoke test 基准一致
+
+### 待办（下次会话或 CMCC 验证后）
+- 跟进校验8 最终结果：确认 8 个 worker 是否都能跑完所有分配的 shard，产出 `.done` 标记（抽样内容质检已 PASS，剩下是规模/完成度确认）
+- 若校验8 通过，决定是否将 `launch_single_node.sh` 的 `-u`/`PYTHONUNBUFFERED=1` 修复同步到 CMCC（用户手动复制）
+- 多节点 RANK/WORLD_SIZE 实际注入方式需对照 CMCC 调度器文档确认（当前已做 SLURM_NODEID/OMPI_COMM_WORLD_RANK fallback，但具体平台变量名待验证，对应校验清单的"校验/Step 8.6"）
+- sekai group 全量产出后，推进批次1剩余 ② DL3DV-ALL-2K ③ SpatialVID-hq
+- 全量批次跑完后需要做产出数据的抽样质检（参考已建立的 F-4 DL3DV 基准 + Sekai 验证流程）
+
+---
+
+## 2026-06-15 会话 4（历史）— Sekai Smoke Test + OOM 修复
+
+### 完成事项
+
+#### DL3DV shard 手工数据核验 ✅
+对 `/mnt/afs/davidwang/workspace/sana_wm_pipeline/shard-000001.tar` 逐字段验证：
+- 6 个文件，格式完全正确
+- poses_c2w(160,4,4)：SO(3) 行列式=1.000000，米制坐标
+- intrinsics(160,1,4)：fx=866.5，FoV=72.9°，主点偏移=0px
+- scale(160,)：全为 1.0（设计行为，度量尺度已内嵌 poses）
+- caption：高质量英文场景描述
+- 相机总轨迹 36.4m / 10s，Y轴跨度 5.17m（SLAM 漂移，Default 模式预期内）
+
+#### smoke_sekai.sh 脚本创建 ✅
+路径：`experiments/data_production_smoke/smoke_sekai.sh`
+- 适配 `wds-sekai-real-walking-hq` group
+- 独立输出目录 `$NEW_BASE/sekai_smoke/`
+- 结构与 DL3DV smoke 脚本完全一致
+
+#### Sekai Smoke Test 第一次尝试：OOM 失败 ❌ → 分析根因 ✅
+```
+torch.OutOfMemoryError: Tried to allocate 1.10 GiB.
+Process 351 (keepalive): 16.73 GiB
+Process 67436 (parent Python): 60.09 GiB  ← 根因
+vipe 子进程 (this process): 2.02 GiB
+Free: 323 MiB
+```
+根因：Pi3X 处理 960 帧后未调 `torch.cuda.empty_cache()`，父进程持有 ~60 GiB 显存缓存，vipe 子进程无法再申请 SLAM 帧缓冲区。
+
+#### mode_default.py OOM 修复 ✅（已同步 AFS）
+三处修改（详见 task_plan.md）：
+1. Pi3X 后：`del pi3x_model, src, accum, count` + `torch.cuda.empty_cache()`
+2. MoGe-2 后：`del moge2_model, frames_t` + `torch.cuda.empty_cache()`
+3. run_default()：cache 存在检查 + vipe 成功后才删 cache
+
+**额外优化（AFS 已写入，CMCC 暂未部署）：**
+chunk 式逐批搬帧：`frames_cpu[s:e].to(device)`，解决超长视频（>5000帧）OOM 问题。
+计算结果与原写法逐位相同，PCIe 传输开销（8ms/chunk）相对 Pi3X 推理（~15s/chunk）可忽略。
+
+#### Sekai Smoke Test 第二次尝试：PASSED ✅
+- Stage 0 ✅：解包 `sekai-real-walking-hq__FP8j6WfkTY_0085528_0087328`，33.0 MB，960 帧
+- Stage 1 ✅：归一化 960 帧 @16fps 1280×720
+- Stage 2 ✅：VIPE SLAM 完成（OOM 修复生效）
+- Stage 3 ✅：shard 打包 → `shard-sekai.tar`
+
+**数据核验结果（手工逐字段验证）：**
+- poses_c2w (960,4,4)：det(R)=1.000000，正交误差 max=1.07e-06，第0帧≈单位矩阵
+- 总轨迹 38.2m / 60s = 0.64m/s（步行速度合理），逐帧步长 mean=3.98cm，无>50cm 大跳变
+- intrinsics (960,1,4)：fx=998.1（Sekai 相机，不同于 DL3DV 的 866.5），FoV=65.3°，cx/cy 主点偏移=0px
+- scale (960,)：全为 1.0（Default 模式设计行为）✅
+- caption：694 字符高质量英文街景描述（曼哈顿雪夜商业街）
+- schema check：1/1 valid ✅
+
+### 关键认知积累
+
+**数据价值认知：**
+- 此类 (video + poses + intrinsics + scale) 联合样本是世界模型最稀缺的训练数据
+- Default 模式的 scale=1.0 是设计行为（度量尺度在 SLAM BA 中注入 poses 平移分量）
+- 单目 SLAM 漂移（ATE RMSE ~127mm）是 Default 模式的正常现象，不影响使用
+
+**GPU 显存分析：**
+- Pi3X 对 T 帧视频：`frames_t`（全量搬 GPU）占 T×10.7/960 GiB，是 O(T) 项
+- 960帧约用 ~60 GiB（含 allocator cache）
+- 超过 ~5000帧 会在 H100 80GB 上 OOM，chunk 式搬帧是根治方案
+
+---
+
+## 2026-06-15 会话 3（历史）— DL3DV C.1 Smoke Test PASSED
+
+### 全部完成
+- 阶段 1: vipe_ext 编译 ✅
+- 阶段 2: 权重核查 ✅
+- 阶段 3: activate_sana_wm.sh 创建 ✅（含 LD_LIBRARY_PATH 修复 + offline flags）
+- 阶段 4: 导入验证 ✅（vipe_ext ✓, vipe ✓, torch 2.12.0+cu130 cuda=True ✓）
+- 阶段 5: C.1 Smoke Test ✅（DL3DV 160帧，Poses(160,4,4)，schema PASS）
+
+### 会话 3 发现的新坑（含修复）
+1. `import nvidia_vipe` 永远失败 — pip 包名 ≠ Python 模块名；改用 `import vipe; import vipe_ext`
+2. `libtorch_python.so undefined symbol` — 系统 LD_LIBRARY_PATH 含 Python3.12 torch；activate.sh prepend 修复
+3. `VIPE_EXT_JIT=1` 触发 JIT 失败 — 改为 `VIPE_EXT_JIT=0`
+4. `No module named 'psutil'` — `pip install psutil`
+5. HF bert-base-uncased 超时 — `TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1`
+6. `No module named 'sana_wm_pipeline'` — `pip install -e $PROJ_DIR --no-deps`
+
+---
+
+## 2026-06-15 会话 2（历史）
+
+### 已完成
+- B.4 conda env ✅
+- B.5 代码 ✅
+- B.6 模型权重+缓存 ✅（GeoCalib pinhole.tar 111MB 已确认）
+- nvidia-vipe 根因诊断完成 ✅
+- AFS setup.py 已 patch（setdefault） ✅
+- vipe_ext C extension ✓, vipe package ✓
+- 根因：容器 LD_LIBRARY_PATH 含系统 Python3.12 torch，覆盖了 env 的 torch
+
+---
+
+## 2026-06-15 会话 1（历史）
+- 完成 CMCC 部署 B.4-B.6
+- 发现 nvidia-vipe 安装失败
+- 确认 GeoCalib .tar 格式权重存在
+- 写完整计划文档

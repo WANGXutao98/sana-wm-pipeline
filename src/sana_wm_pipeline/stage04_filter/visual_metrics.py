@@ -77,6 +77,8 @@ def mean_saturation(frames_rgb: np.ndarray) -> float:
 
     if frames_rgb.ndim != 4 or frames_rgb.shape[-1] != 3:
         raise ValueError(f"frames_rgb must be (T,H,W,3), got {frames_rgb.shape}")
+    if len(frames_rgb) == 0:
+        return 0.0
     means: List[float] = []
     for f in frames_rgb:
         hsv = cv2.cvtColor(f, cv2.COLOR_RGB2HSV)
@@ -95,9 +97,10 @@ def ffmpeg_vmaf_motion(video_path: str, ffmpeg_bin: str = "ffmpeg") -> float:
     import subprocess
     import tempfile
 
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        log_path = f.name
+    log_path = None
     try:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            log_path = f.name
         cmd = [
             ffmpeg_bin, "-nostats", "-loglevel", "error",
             "-i", video_path, "-an",
@@ -105,11 +108,11 @@ def ffmpeg_vmaf_motion(video_path: str, ffmpeg_bin: str = "ffmpeg") -> float:
             "-f", "null", "-",
         ]
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
-        except (FileNotFoundError, subprocess.CalledProcessError):
+            subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return float("nan")
         try:
-            with open(log_path) as fp:
+            with open(log_path, encoding="utf-8") as fp:
                 data = json.load(fp)
         except (FileNotFoundError, json.JSONDecodeError):
             return float("nan")
@@ -121,11 +124,12 @@ def ffmpeg_vmaf_motion(video_path: str, ffmpeg_bin: str = "ffmpeg") -> float:
                 vals.append(float(v))
         return float(np.mean(vals)) if vals else float("nan")
     finally:
-        import os
-        try:
-            os.unlink(log_path)
-        except FileNotFoundError:
-            pass
+        if log_path:
+            import os
+            try:
+                os.unlink(log_path)
+            except (FileNotFoundError, OSError):
+                pass
 
 
 def frame_diff_motion_proxy(frames_rgb: np.ndarray) -> float:

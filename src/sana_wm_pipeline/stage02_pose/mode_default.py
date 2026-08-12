@@ -27,105 +27,23 @@ from .depth_fusion import fuse_depth_sequence
 VIPE_CMD: Sequence[str] = ("vipe", "infer")
 VIPE_PIPELINE = "vipe_cached_depth"
 
-
-def _precompute_depth_cache(
-    clip_path: Path,
-    cache_path: Path,
-    pi3x_weights: str,
-    moge2_weights: str,
-    chunk: int = 16,
-    stride: int = 8,
-    device: str = "cuda",
-) -> None:
-    """预计算 Pi3X+MoGe-2 融合深度缓存（论文 App. B.1），写到 cache_path.npz。
-
-    格式与 experiments/vipe_comparison/precompute_pi3x_depths.py 一致：
-      depths: (T, H, W) float32 metric (metres)
-      scale_history: (T,) float32
-    """
-    import cv2
-    import torch
-    import torch.nn.functional as F
-
-    # 1. 读帧
-    cap = cv2.VideoCapture(str(clip_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {clip_path}")
-    frames = []
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    cap.release()
-    frames_np = np.stack(frames, axis=0).astype(np.float32) / 255.0  # (T,H,W,3)
-    T, H, W, _ = frames_np.shape
-    frames_t = torch.from_numpy(frames_np).permute(0, 3, 1, 2).to(device)  # (T,3,H,W)
-
-    # 2. Pi3X 分块推理（复用 experiments 逻辑，inline 实现）
-    from pi3 import Pi3X  # type: ignore
-    pi3x_model = Pi3X.from_pretrained(pi3x_weights).to(device).eval()
-
-    H_r = (H // 14) * 14
-    W_r = (W // 14) * 14
-    src = F.interpolate(frames_t, size=(H_r, W_r), mode="bilinear", align_corners=False) if H_r != H or W_r != W else frames_t
-
-    accum = np.zeros((T, H_r, W_r), dtype=np.float32)
-    count = np.zeros(T, dtype=np.float32)
-    starts = list(range(0, max(T - chunk + 1, 1), stride))
-    if not starts or starts[-1] + chunk < T:
-        starts.append(max(0, T - chunk))
-
-    with torch.no_grad():
-        for s in starts:
-            e = min(s + chunk, T)
-            out = pi3x_model(src[s:e].unsqueeze(0))
-            d = out["local_points"][0, :e - s, :, :, 2].cpu().numpy()
-            accum[s:e] += d
-            count[s:e] += 1
-    d_pi3x = accum / np.maximum(count[:, None, None], 1.0)
-    if H_r != H or W_r != W:
-        d_pi3x = F.interpolate(
-            torch.from_numpy(d_pi3x).unsqueeze(1).to(device),
-            size=(H, W), mode="bilinear", align_corners=False,
-        ).squeeze(1).cpu().numpy()
-    del pi3x_model
-
-    # 3. MoGe-2 逐帧推理
-    import math
-    from moge.model.v2 import MoGeModel  # type: ignore
-    moge2_path = Path(moge2_weights)
-    moge2_ckpt = moge2_path / "model.pt" if moge2_path.is_dir() else moge2_path
-    moge2_model = MoGeModel.from_pretrained(str(moge2_ckpt)).to(device).eval()
-    fov_x = math.degrees(2 * math.atan(W / (2 * 525.0)))  # 合理初始估计
-    d_moge = []
-    with torch.no_grad():
-        for i in range(T):
-            out = moge2_model.infer(frames_t[i:i + 1], fov_x=fov_x)
-            d_moge.append(out["depth"].squeeze(0).cpu().numpy())
-    d_moge = np.stack(d_moge, axis=0)
-    del moge2_model
-
-    # 4. 融合深度（使用参考实现的加权最小二乘算法）
-    depths_fused, scale_history = fuse_depth_sequence(d_pi3x, d_moge, ema_momentum=0.99)
-    depths_fused = depths_fused.astype(np.float32)
-    scale_history = scale_history.astype(np.float32)
-
-    # 5. 保存
-    np.savez_compressed(str(cache_path), depths=depths_fused, scale_history=scale_history)
+# 旧的inline预计算函数已废弃，替换为独立脚本 scripts/precompute_fused_depth_reference.py
+# def _precompute_depth_cache(...): ...
 
 
 def run_default(
     clip_path: Path,
     work_dir: Path,
     vipe_cmd: Sequence[str] = VIPE_CMD,
-    pipeline: str = VIPE_PIPELINE,
+    pipeline: str = "vipe_sanawm",  # 使用新的Pi3xMogeModel配置
 ) -> PoseArtifact:
-    """Invoke two-phase VIPE: precompute depth cache, then run cached SLAM.
+    """Invoke two-phase VIPE: precompute depth, then run SLAM with pi3xmoge backend.
 
-    Phase A: compute Pi3X+MoGe-2 fused depth cache (~600 MB, deleted after).
-    Phase B: VIPE SLAM with vipe_cached_depth pipeline (CachedDepthModel injects BA).
+    Phase A: 调用独立预计算脚本生成融合深度 (fused.npy, sig.npy, scales.npy)
+    Phase B: VIPE SLAM with vipe_sanawm pipeline (Pi3xMogeModel + 逐帧内参BA ready)
     """
+    import sys
+
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -136,14 +54,19 @@ def run_default(
             "SANA_WM_PI3X_WEIGHTS and SANA_WM_MOGE2_WEIGHTS must be set"
         )
 
-    cache_path = work_dir / "_depth_cache.npz"
-    _precompute_depth_cache(
-        clip_path, cache_path,
-        pi3x_weights=pi3x_weights,
-        moge2_weights=moge2_weights,
-    )
+    # Phase A: 调用独立预计算脚本（对齐参考实现）
+    depth_dir = work_dir / "depth_precomputed"
+    precompute_script = Path(__file__).parent.parent.parent.parent / "scripts" / "precompute_fused_depth_reference.py"
 
-    os.environ["SANA_WM_CACHED_DEPTH_PATH"] = str(cache_path)
+    subprocess.check_call([
+        sys.executable,
+        str(precompute_script),
+        str(clip_path),
+        str(depth_dir),
+    ])
+
+    # Phase B: VIPE SLAM with Pi3xMogeModel
+    os.environ["SANA_WM_FUSED_DEPTH_DIR"] = str(depth_dir)
     try:
         cmd = [
             *vipe_cmd,
@@ -153,8 +76,7 @@ def run_default(
         ]
         subprocess.check_call(cmd)
     finally:
-        os.environ.pop("SANA_WM_CACHED_DEPTH_PATH", None)
-        cache_path.unlink(missing_ok=True)
+        os.environ.pop("SANA_WM_FUSED_DEPTH_DIR", None)
 
     return _load_vipe_artifacts(clip_path, work_dir)
 

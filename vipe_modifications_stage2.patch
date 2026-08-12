@@ -1,0 +1,14 @@
+diff --git a/vipe/priors/depth/__init__.py b/vipe/priors/depth/__init__.py
+index 5df44e2..4515c86 100644
+--- a/vipe/priors/depth/__init__.py
++++ b/vipe/priors/depth/__init__.py
+@@ -55,5 +55,9 @@ def make_depth_model(model: str):
+             raise ValueError("cached depth model requires SANA_WM_CACHED_DEPTH_PATH env var")
+         return CachedDepthModel(cache_path=cache_path)
+ 
++    elif model_name == "pi3xmoge":
++        from .pi3xmoge import Pi3xMogeModel
++        return Pi3xMogeModel()
++
+     else:
+         raise ValueError(f"Unknown depth model: {model}")

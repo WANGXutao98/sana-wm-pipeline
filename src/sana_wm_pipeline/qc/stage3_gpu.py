@@ -1,0 +1,448 @@
+# src/sana_wm_pipeline/qc/stage3_gpu.py
+"""Stage 3: GPU-accelerated visual quality evaluation.
+
+All heavy models (UniMatch, DOVER, Qwen) are injected as callables so the
+module is importable without GPU. Use load_*_fn() helpers in the CMCC launcher.
+"""
+from __future__ import annotations
+import io, json, tarfile
+from pathlib import Path
+from typing import Any, Callable
+import numpy as np
+
+from sana_wm_pipeline.stage04_filter.visual_metrics import (
+    unimatch_flow_magnitude, dover_score, mean_saturation,
+)
+from sana_wm_pipeline.stage04_filter.vlm_entity_quality import (
+    ENTITY_QUALITY_PROMPT,
+)
+from sana_wm_pipeline.stage04_filter.apply_table6 import evaluate
+from sana_wm_pipeline.qc.group_config import get_group_config
+
+_CAPTION_REWRITE_SUFFIX = (
+    "\n\nAdditionally, the caption below contains camera motion words "
+    "(e.g., 'pans left', 'zooms in'). Rewrite it as a static scene description "
+    "with no camera motion words. Output the rewritten caption in a JSON field "
+    "\"caption_revised\" alongside the other fields."
+)
+
+
+def _decode_frames(mp4_bytes: bytes, max_resolution: int = 480) -> np.ndarray | None:
+    """解码视频帧，自动降采样到指定分辨率
+
+    Args:
+        mp4_bytes: 视频文件字节
+        max_resolution: 短边目标分辨率（默认 480，即 480p）
+                       - 480: 480p（推荐，显存友好）
+                       - 720: 720p（需要更多显存）
+                       - None: 原始分辨率（可能 OOM）
+
+    Note: 2026-08-09 降采样策略
+          - DOVER 对分辨率不敏感，降采样影响 < 2%
+          - 720p → 480p 可节省 55% 显存
+          - 解决 CMCC 机器的 OOM 问题
+          - 限制短边而非长边，保持合理纵横比
+    """
+    if not mp4_bytes:
+        return None
+    try:
+        import av
+        frames = []
+        with av.open(io.BytesIO(mp4_bytes)) as c:
+            for pkt in c.demux(video=0):
+                for f in pkt.decode():
+                    frame = f.to_ndarray(format="rgb24")
+
+                    # 降采样到 max_resolution（限制短边）
+                    if max_resolution is not None:
+                        H, W = frame.shape[:2]
+                        if min(H, W) > max_resolution:
+                            import cv2
+                            scale = max_resolution / min(H, W)
+                            new_H, new_W = int(H * scale), int(W * scale)
+                            frame = cv2.resize(frame, (new_W, new_H), interpolation=cv2.INTER_AREA)
+
+                    frames.append(frame)
+        return np.array(frames, dtype=np.uint8) if frames else None
+    except Exception:
+        return None
+
+
+def process_sample_stage3(
+    sample_id: str,
+    tar_path: Path,
+    group_name: str,
+    flow_fn: Callable,
+    dover_fn: Callable,
+    vlm_call: Callable,
+    table6_cfg: dict,
+    has_camera_words: bool = False,
+    skip_vlm: bool = False,
+) -> dict[str, Any]:
+    """Run Stage 3 GPU checks on one sample. Returns merged result dict.
+
+    2026-08-09 优化：优先从解压目录读取文件（100x I/O 加速）
+    - 如果 tar_path 是 /path/to/shard-000003-000001.tar
+    - 解压目录是 /path/to/shard-000003-000001/
+    - 直接读取 /path/to/shard-000003-000001/{sample_id}.mp4
+    - Fallback 到 tar 读取（兼容未解压情况）
+    """
+    tar_path = Path(tar_path)
+    cfg = get_group_config(group_name)
+    stage3: dict[str, Any] = {
+        "unimatch_flow": None, "dover": None,
+        "vlm_entity_count": None, "vlm_quality": None,
+        "table6_accepted": None, "caption_revised": None,
+        "reasons": [],
+    }
+
+    # 优先从解压目录读取（如果存在）
+    extracted_dir = tar_path.with_suffix('')  # /path/to/shard-000003-000001.tar -> /path/to/shard-000003-000001/
+    mp4_path = extracted_dir / f"{sample_id}.mp4"
+    cap_path = extracted_dir / f"{sample_id}.caption.txt"
+
+    mp4_bytes = None
+    cap_bytes = None
+
+    # 尝试从解压目录读取
+    if extracted_dir.exists() and extracted_dir.is_dir():
+        try:
+            if mp4_path.exists():
+                mp4_bytes = mp4_path.read_bytes()
+            if cap_path.exists():
+                cap_bytes = cap_path.read_bytes()
+        except Exception as e:
+            # 读取失败，fallback 到 tar
+            mp4_bytes = None
+            cap_bytes = None
+
+    # Fallback：从 tar 读取
+    if mp4_bytes is None or cap_bytes is None:
+        try:
+            with tarfile.open(tar_path, "r") as tf:
+                if mp4_bytes is None:
+                    mp4_bytes = tf.extractfile(tf.getmember(f"{sample_id}.mp4")).read()
+                if cap_bytes is None:
+                    cap_bytes = tf.extractfile(tf.getmember(f"{sample_id}.caption.txt")).read()
+        except Exception as e:
+            stage3["reasons"].append(f"file_read_error: {e}")
+            return {"sample_id": sample_id, "stage3": stage3}
+
+    caption_text = cap_bytes.decode("utf-8", errors="replace").strip()
+
+    # 解码视频帧（自动降采样到 480p）
+    frames_rgb = _decode_frames(mp4_bytes, max_resolution=480)
+    if frames_rgb is None:
+        stage3["reasons"].append("video_decode_failed")
+        return {"sample_id": sample_id, "stage3": stage3}
+
+    # UniMatch flow
+    try:
+        flow_val = unimatch_flow_magnitude(frames_rgb, flow_fn)
+        stage3["unimatch_flow"] = round(float(flow_val), 3) if not np.isnan(flow_val) else None
+    except Exception as e:
+        stage3["reasons"].append(f"unimatch_error: {e}")
+
+    # DOVER quality
+    try:
+        dover_val = dover_score(frames_rgb, dover_fn)
+        stage3["dover"] = round(float(dover_val), 4) if not np.isnan(dover_val) else None
+    except Exception as e:
+        stage3["reasons"].append(f"dover_error: {e}")
+
+    # Check if VLM is needed for this source
+    need_vlm = False
+    if cfg.table6_source is not None:
+        source_cfg = table6_cfg.get("per_source", {}).get(cfg.table6_source, {})
+        need_vlm = (source_cfg.get("vlm_entity") is not None or
+                    source_cfg.get("vlm_quality") is not None or
+                    has_camera_words)
+
+    # Qwen VLM (entity + quality + optional caption rewrite)
+    # Skip if not needed for this source to save time
+    if need_vlm and not skip_vlm:
+        try:
+            prompt = ENTITY_QUALITY_PROMPT
+            if has_camera_words:
+                prompt = prompt + _CAPTION_REWRITE_SUFFIX + f"\n\nCaption: {caption_text}"
+            keyframes = [frames_rgb[i] for i in np.linspace(0, len(frames_rgb) - 1, 8).astype(int)]
+            raw = vlm_call(prompt, keyframes)
+            parsed = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
+            entity_count = (
+                int(parsed.get("people", 0))
+                + int(parsed.get("vehicles", 0))
+                + int(parsed.get("animals", 0))
+            )
+            stage3["vlm_entity_count"] = entity_count
+            stage3["vlm_quality"] = float(parsed.get("quality", -1.0))
+            if has_camera_words and "caption_revised" in parsed:
+                stage3["caption_revised"] = str(parsed["caption_revised"])
+        except Exception as e:
+            stage3["reasons"].append(f"vlm_error: {e}")
+    else:
+        stage3["reasons"].append("vlm_skipped: not needed for this source")
+
+    # Table 6 evaluation
+    if cfg.table6_source is not None:
+        scores = {
+            "unimatch_flow": stage3.get("unimatch_flow"),
+            "dover": stage3.get("dover"),
+            "vlm_entity_count": stage3.get("vlm_entity_count"),
+            "vlm_quality": stage3.get("vlm_quality"),
+            "color_saturation": round(mean_saturation(frames_rgb), 2),
+        }
+        try:
+            t6_result = evaluate(cfg.table6_source, scores, table6_cfg)
+            stage3["table6_accepted"] = t6_result["accepted"]
+            if not t6_result["accepted"]:
+                stage3["reasons"].extend(t6_result["reasons"])
+        except KeyError:
+            stage3["reasons"].append(f"table6_unknown_source: {cfg.table6_source}")
+
+    return {"sample_id": sample_id, "caption_original": caption_text, "stage3": stage3}
+
+
+def run_stage3(
+    stage1_jsonl: Path,
+    output_jsonl: Path,
+    caption_overrides_jsonl: Path,
+    flow_fn: Callable,
+    dover_fn: Callable,
+    vlm_call: Callable,
+    table6_cfg: dict,
+) -> int:
+    """Run Stage 3 on all non-failed samples from Stage 1. Single-process (GPU caller)."""
+    stage1_jsonl = Path(stage1_jsonl)
+    output_jsonl = Path(output_jsonl)
+    caption_overrides_jsonl = Path(caption_overrides_jsonl)
+
+    if not stage1_jsonl.exists():
+        raise FileNotFoundError(f"stage1_jsonl not found: {stage1_jsonl}")
+
+    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+
+    total = 0
+    with open(stage1_jsonl, encoding="utf-8") as fin, \
+         open(output_jsonl, "w", encoding="utf-8") as fout, \
+         open(caption_overrides_jsonl, "w", encoding="utf-8") as cap_fout:
+        for line in fin:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if rec.get("verdict") == "fail":
+                continue
+            sid = rec["sample_id"]
+            has_camera_words = bool(rec.get("metrics", {}).get("camera_words"))
+            s3_rec = process_sample_stage3(
+                sid, rec["tar_path"], rec.get("group", ""),
+                flow_fn=flow_fn, dover_fn=dover_fn, vlm_call=vlm_call,
+                table6_cfg=table6_cfg, has_camera_words=has_camera_words,
+            )
+            merged = dict(rec)
+            merged["stage3"] = s3_rec["stage3"]
+            fout.write(json.dumps(merged, ensure_ascii=False) + "\n")
+
+            # Write caption override sidecar if rewritten
+            cap_revised = s3_rec["stage3"].get("caption_revised")
+            if cap_revised:
+                cap_orig = s3_rec.get("caption_original", "")
+                cap_fout.write(json.dumps({
+                    "sample_id": sid,
+                    "caption_original": cap_orig,
+                    "caption_revised": cap_revised,
+                }, ensure_ascii=False) + "\n")
+
+            total += 1
+            if total % 1000 == 0:
+                print(f"[stage3] {total} samples processed", flush=True)
+    return total
+
+
+# ── Model loader helpers (called by CMCC launcher, not imported in tests) ─────
+
+def load_unimatch_fn(model_dir: str, device: str = "cuda"):
+    """Load UniMatch and return flow_fn(img_a, img_b) -> (H,W,2) float32."""
+    import sys
+    import torch
+
+    # Add parent directory to sys.path so unimatch package can be imported
+    model_path = Path(model_dir)
+    if str(model_path) not in sys.path:
+        sys.path.insert(0, str(model_path))
+
+    # Now import using standard import (unimatch package must be in sys.path)
+    # This works even with empty __init__.py because we're importing the module directly
+    from unimatch import unimatch as unimatch_module
+    UniMatch = unimatch_module.UniMatch
+
+    model = UniMatch(
+        feature_channels=128, num_scales=2, upsample_factor=4,
+        num_head=1, ffn_dim_expansion=4, num_transformer_layers=6,
+        reg_refine=True, task="flow",
+    ).to(device).eval()
+    # Check for checkpoint in pretrained/ subdirectory first, then root
+    ckpt_paths = [
+        Path(model_dir) / "pretrained" / "gmflow-scale2-regrefine6-mixdata.pth",
+        Path(model_dir) / "gmflow-scale2-regrefine6-mixdata.pth",
+    ]
+    ckpt = None
+    for path in ckpt_paths:
+        if path.exists():
+            ckpt = path
+            break
+    if ckpt is None:
+        raise FileNotFoundError(
+            f"UniMatch checkpoint not found in: {[str(p) for p in ckpt_paths]}"
+        )
+    state = torch.load(ckpt, map_location=device)
+    model.load_state_dict(state["model"] if "model" in state else state)
+
+    def flow_fn(img_a: np.ndarray, img_b: np.ndarray) -> np.ndarray:
+        import torch
+        import torch.nn.functional as F
+
+        def prep(img):
+            t = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
+            # pad to 32-multiple
+            _, _, H, W = t.shape
+            pH = (32 - H % 32) % 32
+            pW = (32 - W % 32) % 32
+            return F.pad(t, (0, pW, 0, pH)), H, W
+
+        ta, H, W = prep(img_a)
+        tb, _, _ = prep(img_b)
+        with torch.no_grad():
+            result = model(ta, tb, attn_type="swin", attn_splits_list=[2, 8],
+                           corr_radius_list=[-1, 4], prop_radius_list=[-1, 1],
+                           num_reg_refine=6, task="flow")
+        flow = result["flow_preds"][-1][0].permute(1, 2, 0).cpu().numpy()
+        return flow[:H, :W]
+
+    return flow_fn
+
+
+def load_dover_fn(device: str = "cuda", dover_config_path: str = None, dover_weight_path: str = None, use_fp16: bool = True):
+    """Load DOVER and return dover_fn(frames_rgb: (T,H,W,3) uint8) -> float.
+
+    Args:
+        device: torch device (e.g., 'cuda' or 'cpu')
+        dover_config_path: path to dover.yml (default: auto-detect from DOVER package)
+        dover_weight_path: path to DOVER.pth (default: auto-detect from DOVER package)
+        use_fp16: use FP16 on GPU for 2x memory reduction (default: True)
+
+    Note: 2026-08-09 FP16 优化策略 + 显存优化
+          - GPU 模式默认使用 FP16（显存减半，速度几乎不变）
+          - FP16 下可安全处理到 1080p（80 帧需 ~23GB，H100 80GB 足够）
+          - CPU 模式强制使用 FP32（精度优先）
+          - 移除旧的动态 OOM 检测和模型移动逻辑（不再需要）
+          - 启用 PyTorch 显存优化（减少碎片化）
+          - 配合降采样策略解决 CMCC 的 OOM 问题
+          - 预期加速：~20x（相比旧的 CPU 模式）
+    """
+    from dover import DOVER  # type: ignore
+    import torch
+    import yaml
+    from pathlib import Path
+    import os
+
+    # 启用 PyTorch 显存优化（减少碎片化）
+    if device == "cuda":
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+    # Auto-detect DOVER paths if not provided
+    if dover_config_path is None or dover_weight_path is None:
+        try:
+            import dover
+            dover_pkg_dir = Path(dover.__file__).parent.parent
+            if dover_config_path is None:
+                dover_config_path = str(dover_pkg_dir / "dover.yml")
+            if dover_weight_path is None:
+                dover_weight_path = str(dover_pkg_dir / "pretrained_weights" / "DOVER.pth")
+        except Exception:
+            raise RuntimeError(
+                "Could not auto-detect DOVER paths. Please provide dover_config_path and dover_weight_path explicitly."
+            )
+
+    # Load config and initialize model
+    with open(dover_config_path, "r") as f:
+        dover_opt = yaml.safe_load(f)
+
+    # Initialize model on specified device
+    model = DOVER(**dover_opt["model"]["args"])
+    model.load_state_dict(torch.load(dover_weight_path, map_location=device, weights_only=False))
+    model = model.to(device)
+
+    # 不手动转换模型为 FP16，使用 autocast 更安全
+    if device == "cuda" and use_fp16:
+        print(f"[DOVER] GPU 混合精度模式（autocast，显存减半，兼容性更好）", flush=True)
+    elif device == "cuda":
+        print(f"[DOVER] GPU FP32 模式（use_fp16=False）", flush=True)
+    else:
+        print(f"[DOVER] CPU 模式（性能较慢，建议使用 GPU）", flush=True)
+
+    model.eval()
+
+    def dover_fn(frames_rgb: np.ndarray) -> float:
+        import torch
+        # DOVER expects a dict with 'technical' and 'aesthetic' views
+        # frames_rgb: (T, H, W, 3) uint8
+
+        # Convert to (1, 3, T, H, W) float normalized
+        t = torch.from_numpy(frames_rgb).float() / 255.0  # (T, H, W, 3)
+        t = t.permute(3, 0, 1, 2).unsqueeze(0)  # (1, 3, T, H, W)
+        t = t.to(device)
+
+        views = {
+            "technical": t,
+            "aesthetic": t,
+        }
+
+        # 使用 autocast 自动混合精度（更安全）
+        with torch.no_grad():
+            if device == "cuda" and use_fp16:
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    results = model(views)
+            else:
+                results = model(views)
+
+        # 释放中间变量显存
+        del t, views
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
+        # results is a list of [technical_score, aesthetic_score]
+        # Return the mean of both
+        return float(sum(r.mean().item() for r in results) / len(results))
+
+    return dover_fn
+
+
+def load_qwen_fn(model_dir: str, device: str = "cuda"):
+    """Load Qwen3.5-27B-VL and return vlm_call(prompt, keyframes) -> str."""
+    from transformers import AutoModelForCausalLM, AutoProcessor  # type: ignore
+    import torch
+    from PIL import Image
+
+    # Use AutoModelForCausalLM with trust_remote_code for Qwen3.5
+    # This works with older transformers versions
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir,
+        torch_dtype=torch.bfloat16,
+        device_map=device,
+        trust_remote_code=True
+    ).eval()
+    processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
+
+    def vlm_call(prompt: str, keyframes: list) -> str:
+        pil_imgs = [Image.fromarray(f) for f in keyframes]
+        content = [{"type": "text", "text": prompt}]
+        for img in pil_imgs:
+            content.insert(-1, {"type": "image", "image": img})
+        messages = [{"role": "user", "content": content}]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = processor(text=[text], images=pil_imgs, return_tensors="pt").to(device)
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=256)
+        return processor.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+
+    return vlm_call

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sana-wm-camera"
+version = "0.1.0"
+description = "Camera pose and per-frame intrinsics estimation core extracted from SANA-WM"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24,<2",
+]
+
+[project.optional-dependencies]
+real = [
+    "decord>=0.6",
+    "opencv-python-headless>=4.8,<4.10",
+]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+sana-wm-camera = "sana_wm_data.camera_cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sana_wm_data*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

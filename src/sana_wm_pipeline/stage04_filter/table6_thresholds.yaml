@@ -1,0 +1,84 @@
+# SANA-WM paper Table 6 — per-source visual / VLM thresholds.
+# Source order and ranges are from arXiv:2605.15178v1 Table 6.
+# "null" means the filter is NOT applied for that source ("—" in paper).
+#
+# Range convention:
+#   [lo, hi]        — value must satisfy  lo <= v <= hi
+#   scene_cuts_max  — integer ceiling (v must be <= max)
+
+per_source:
+  # OmniWorld-Game: 第三人称游戏场景，运动幅度大
+  OmniWorld:
+    vmaf_motion:      [0.5, 100]   # 允许较大运动
+    unimatch_flow:    [3, 100]     # 光流幅度可以很大
+    dover:            [0.35, 1.0]  # 质量要求适中
+    color_saturation: null         # 不检查饱和度
+    scene_cuts_max:   null         # 允许场景切换
+    vlm_entity:       [0, 10]      # 实体数量控制
+    vlm_quality:      [0.5, 1.5]   # VLM 质量检查
+
+  # Sekai 游戏场景 - 步行视角
+  Sekai_Game_Walking:
+    vmaf_motion:      [0.5, 50]
+    unimatch_flow:    [3, 80]
+    dover:            [0.25, 1.0]  # 游戏画面质量要求略低
+    color_saturation: null
+    scene_cuts_max:   null
+    vlm_entity:       [0, 10]
+    vlm_quality:      [0.5, 1.5]
+
+  # Sekai 游戏场景 - 航拍/无人机视角：基线大，光流幅度更大
+  Sekai_Game_Drone:
+    vmaf_motion:      [0.5, 100]
+    unimatch_flow:    [3, 150]     # 航拍允许更大光流
+    dover:            [0.25, 1.0]
+    color_saturation: null
+    scene_cuts_max:   null
+    vlm_entity:       [0, 10]
+    vlm_quality:      [0.5, 1.5]
+
+  # Sekai 真实场景 - 步行视角
+  Sekai_Walking:
+    vmaf_motion:      [0.5, 50]
+    unimatch_flow:    [3, 50]      # 真实场景运动更平滑
+    dover:            [0.35, 1.0]  # 真实场景质量要求稍高
+    color_saturation: [0, 180]     # 需要饱和度检查
+    scene_cuts_max:   null
+    vlm_entity:       [0, 25]      # 真实场景实体更多
+    vlm_quality:      [0.5, 1.5]
+
+  # RealEstate10K-360p: 室内建筑漫游，严格阈值
+  RealEstate10K:
+    vmaf_motion:      [0.5, 50]
+    unimatch_flow:    [3, 80]
+    dover:            [0.40, 1.0]  # 质量要求较高
+    color_saturation: [0, 180]
+    scene_cuts_max:   1            # 最多允许 1 次切换
+    vlm_entity:       null         # 不检查实体
+    vlm_quality:      null         # 不用 VLM
+
+  # DL3DV-ALL-2K: 室内 3D 扫描场景，严格质量控制
+  DL3DV:
+    vmaf_motion:      [0.5, 50]
+    unimatch_flow:    [3, 80]
+    dover:            [0.40, 1.0]
+    color_saturation: [0, 180]
+    scene_cuts_max:   1
+    vlm_entity:       null         # 不检查实体
+    vlm_quality:      null         # 不用 VLM
+
+  # SpatialVID-hq: 空间视频，质量要求较高
+  SpatialVID:
+    vmaf_motion:      [0.5, 50]
+    unimatch_flow:    [3, 80]
+    dover:            [0.35, 1.0]
+    color_saturation: [0, 180]
+    scene_cuts_max:   null         # 允许场景切换
+    vlm_entity:       [0, 10]
+    vlm_quality:      [0.5, 1.5]
+
+# Uniform camera filters live elsewhere; documented here for cross-reference.
+camera:
+  fov_deg:          [25, 120]
+  focal_div_max:    0.20
+  scale_cv_max:     2.0

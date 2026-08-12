@@ -22,6 +22,7 @@ from typing import Sequence
 import numpy as np
 
 from ._common import PoseArtifact
+from .depth_fusion import fuse_depth_sequence
 
 VIPE_CMD: Sequence[str] = ("vipe", "infer")
 VIPE_PIPELINE = "vipe_cached_depth"
@@ -105,19 +106,10 @@ def _precompute_depth_cache(
     d_moge = np.stack(d_moge, axis=0)
     del moge2_model
 
-    # 4. EMA scale fusion（论文 App. B.1）
-    T_ = len(d_pi3x)
-    scale_history = np.zeros(T_, dtype=np.float32)
-    ema = None
-    for t in range(T_):
-        mask = (d_pi3x[t] > 1e-6) & (d_moge[t] > 1e-6)
-        ratio = float(d_moge[t][mask].mean()) / (float(d_pi3x[t][mask].mean()) + 1e-8) if mask.sum() >= 10 else 1.0
-        if ema is None:
-            ema = float(np.median(d_moge[t][mask] / (d_pi3x[t][mask] + 1e-8))) if mask.sum() >= 10 else ratio
-        else:
-            ema = ema * 0.99 + ratio * 0.01
-        scale_history[t] = ema
-    depths_fused = (d_pi3x * scale_history[:, None, None]).astype(np.float32)
+    # 4. 融合深度（使用参考实现的加权最小二乘算法）
+    depths_fused, scale_history = fuse_depth_sequence(d_pi3x, d_moge, ema_momentum=0.99)
+    depths_fused = depths_fused.astype(np.float32)
+    scale_history = scale_history.astype(np.float32)
 
     # 5. 保存
     np.savez_compressed(str(cache_path), depths=depths_fused, scale_history=scale_history)

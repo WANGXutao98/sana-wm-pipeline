@@ -66,3 +66,25 @@ data/
 .bin/
 experiments/vipe_comparison/results/cache_pi3x_moge2_fr2_desk.npz
 models/DOVER
+
+# Large model files and datasets (project-specific)
+models/
+output.zip
+qc_example_data/
+sana-qc-human-final/
+scripts/resume_refactor_task.sh
+stage2_result/
+testdata.zip
+testdata/
+
+# Temporary experiment results
+experiments/*/results/
+experiments/*/cache/
+
+# VIPE artifacts (large intermediate files)
+third_party/vipe/.venv-vipe/
+*.npz
+*.tar.gz
+
+# CMCC deployment artifacts
+cmcc_sana_data/

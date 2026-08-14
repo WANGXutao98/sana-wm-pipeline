@@ -35,14 +35,16 @@ def run_default(
     clip_path: Path,
     work_dir: Path,
     vipe_cmd: Sequence[str] = VIPE_CMD,
-    pipeline: str = "vipe_sanawm",  # 使用新的Pi3xMogeModel配置
+    pipeline: str = "vipe_sanawm",
 ) -> PoseArtifact:
-    """Invoke two-phase VIPE: precompute depth, then run SLAM with pi3xmoge backend.
+    """使用sana-wm-data-clean参考实现（带@lru_cache模型缓存）
 
-    Phase A: 调用独立预计算脚本生成融合深度 (fused.npy, sig.npy, scales.npy)
-    Phase B: VIPE SLAM with vipe_sanawm pipeline (Pi3xMogeModel + 逐帧内参BA ready)
+    Phase A: 使用_real.py的pi3_infer + moge_metric_depth（模型只加载一次）
+    Phase B: VIPE SLAM with vipe_sanawm pipeline
     """
     import sys
+    import cv2
+    from ..sana_wm_data_clean.pose import _real
 
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -54,18 +56,48 @@ def run_default(
             "SANA_WM_PI3X_WEIGHTS and SANA_WM_MOGE2_WEIGHTS must be set"
         )
 
-    # Phase A: 调用独立预计算脚本（对齐参考实现）
+    # Phase A: 使用sana-wm-data-clean的_real.py（带@lru_cache）
+    print("[mode_default] Phase A: 深度预计算", flush=True)
     depth_dir = work_dir / "depth_precomputed"
-    precompute_script = Path(__file__).parent.parent.parent.parent / "scripts" / "precompute_fused_depth_reference.py"
+    depth_dir.mkdir(parents=True, exist_ok=True)
 
-    subprocess.check_call([
-        sys.executable,
-        str(precompute_script),
-        str(clip_path),
-        str(depth_dir),
-    ])
+    # 读取视频帧（均匀采样64帧）
+    max_frames = int(os.environ.get("SANA_WM_MAX_FRAMES", "64"))
+    print(f"  读取视频: {clip_path}", flush=True)
+    frames = _read_frames_uniform(str(clip_path), max_frames)
+    S = frames.shape[0]
+    print(f"  采样帧数: {S}", flush=True)
+
+    # Pi3推理（第一次调用50s，后续调用直接用缓存0s）
+    print(f"  Pi3推理 ({S}帧)...", flush=True)
+    poses_pi3, depth_pi3 = _real.pi3_infer(frames)
+
+    # MoGe推理（第一次调用30s，后续调用直接用缓存0s）
+    print(f"  MoGe-2推理 ({S}帧)...", flush=True)
+    depth_moge = _real.moge_metric_depth(frames, ref_hw=depth_pi3.shape[1:])
+
+    # 深度融合
+    print(f"  深度融合...", flush=True)
+    fused, scales = fuse_depth_sequence(depth_pi3, np.abs(depth_moge), ema_momentum=0.99)
+
+    # 保存预计算结果（供VIPE使用）
+    np.save(depth_dir / "fused.npy", fused.astype(np.float32))
+    np.save(depth_dir / "scales.npy", scales.astype(np.float32))
+
+    # 计算RGB签名（16x16下采样）
+    sig = _compute_rgb_signatures(frames)
+    np.save(depth_dir / "sig.npy", sig)
+
+    # 保存采样索引
+    import decord
+    total_frames = len(decord.VideoReader(str(clip_path)))
+    sample_idx = np.linspace(0, total_frames - 1, S).round().astype(int)
+    np.save(depth_dir / "sample_idx.npy", sample_idx)
+
+    print(f"  ✅ 预计算完成: fused{fused.shape}, scale~{float(np.median(scales)):.3f}", flush=True)
 
     # Phase B: VIPE SLAM with Pi3xMogeModel
+    print("[mode_default] Phase B: VIPE SLAM", flush=True)
     os.environ["SANA_WM_FUSED_DEPTH_DIR"] = str(depth_dir)
     try:
         cmd = [
@@ -79,6 +111,28 @@ def run_default(
         os.environ.pop("SANA_WM_FUSED_DEPTH_DIR", None)
 
     return _load_vipe_artifacts(clip_path, work_dir)
+
+
+def _read_frames_uniform(video_path: str, max_frames: int) -> np.ndarray:
+    """均匀采样视频帧 -> (S, H, W, 3) uint8 RGB"""
+    import decord
+    vr = decord.VideoReader(video_path)
+    total = len(vr)
+    S = min(max_frames, total)
+    indices = np.linspace(0, total - 1, S).round().astype(int)
+    frames = vr.get_batch(indices).asnumpy()  # (S, H, W, 3) RGB uint8
+    return frames
+
+
+def _compute_rgb_signatures(frames: np.ndarray) -> np.ndarray:
+    """计算RGB 16x16签名 -> (S, 768)"""
+    import cv2
+    S = frames.shape[0]
+    sig = np.zeros((S, 768), dtype=np.float32)
+    for i, f in enumerate(frames):
+        small = cv2.resize(f, (16, 16), interpolation=cv2.INTER_AREA)
+        sig[i] = small.reshape(-1).astype(np.float32) / 255.0
+    return sig
 
 
 def _load_vipe_artifacts(clip_path: Path, vipe_out: Path) -> PoseArtifact:
@@ -116,9 +170,42 @@ def _load_vipe_artifacts(clip_path: Path, vipe_out: Path) -> PoseArtifact:
     # Reshape intrinsics to (T, 1, 4) as required by PoseArtifact.
     intrinsics_nvd = intrinsics_full[:, None, :]  # (T, 1, 4)
 
-    # scale_per_frame: metric scale ratio (Pi3X-EMA gives this; here we use 1s
-    # since VIPE's unidepth backend already produces metric depth directly).
-    scale_per_frame = np.ones(T_full, dtype=np.float32)
+    # Load scale_per_frame from Phase A (与官方sana-wm-data-clean一致)
+    # 官方: stage.py:104 → scales = scales_arr.tolist()
+    depth_dir = vipe_out / "depth_precomputed"
+    scale_path = depth_dir / "scales.npy"
+
+    if scale_path.exists():
+        scales_full = np.load(scale_path).astype(np.float32)  # (S,) Phase A采样的帧数
+
+        # 如果Phase A采样了关键帧（S < T_full），需要插值到全部帧
+        sample_idx_path = depth_dir / "sample_idx.npy"
+        if sample_idx_path.exists() and len(scales_full) < T_full:
+            sample_idx = np.load(sample_idx_path).astype(int)  # (S,) 采样索引
+            # 线性插值到T_full帧
+            scale_per_frame = np.interp(
+                np.arange(T_full),
+                sample_idx,
+                scales_full
+            ).astype(np.float32)
+            print(f"[mode_default] ✅ Interpolated {len(scales_full)} scales to {T_full} frames")
+        else:
+            # 无需插值，直接使用（或截断）
+            scale_per_frame = scales_full[:T_full] if len(scales_full) >= T_full else scales_full
+            if len(scale_per_frame) < T_full:
+                # 不足则补1.0
+                padding = np.ones(T_full - len(scale_per_frame), dtype=np.float32)
+                scale_per_frame = np.concatenate([scale_per_frame, padding])
+            print(f"[mode_default] ✅ Loaded {len(scales_full)} scales directly")
+
+        print(f"[mode_default]    Scale range: {scale_per_frame.min():.3f} - {scale_per_frame.max():.3f}")
+        print(f"[mode_default]    Scale mean±std: {scale_per_frame.mean():.3f} ± {scale_per_frame.std():.3f}")
+        scale_cov = scale_per_frame.std() / (scale_per_frame.mean() + 1e-8)
+        print(f"[mode_default]    Scale CoV: {scale_cov:.3f} (threshold: <2.0)")
+    else:
+        # Fallback: Phase A失败或缺失时使用默认值
+        scale_per_frame = np.ones(T_full, dtype=np.float32)
+        print(f"[mode_default] ⚠️  {scale_path} not found, using default scale=1.0")
 
     # Optional downsampled depth for visualization.
     depth_ds = _try_load_depth_downsampled(vipe_out, stem, T_full)

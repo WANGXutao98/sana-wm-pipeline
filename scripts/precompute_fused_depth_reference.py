@@ -57,7 +57,12 @@ def pi3x_infer(frames: np.ndarray, weights_path: str, device: str = "cuda") -> n
     """Pi3X推理（分块处理）"""
     from pi3 import Pi3X
 
-    model = Pi3X.from_pretrained(weights_path).to(device).eval()
+    print(f"  [Pi3X] 加载模型到 {device}...", flush=True)
+    import time
+    t0 = time.time()
+    # 直接加载到GPU（通过map_location）
+    model = Pi3X.from_pretrained(weights_path, map_location=device).eval()
+    print(f"  [Pi3X] 加载完成，耗时 {time.time()-t0:.1f}秒", flush=True)
 
     S, H, W, _ = frames.shape
     H_r = (H // 14) * 14
@@ -104,8 +109,12 @@ def moge2_infer(frames: np.ndarray, weights_path: str, device: str = "cuda") -> 
     import math
     from moge.model.v2 import MoGeModel
 
+    print(f"  [MoGe-2] 加载模型到 {device}...", flush=True)
+    import time
+    t0 = time.time()
     ckpt_path = Path(weights_path) / "model.pt" if Path(weights_path).is_dir() else Path(weights_path)
-    model = MoGeModel.from_pretrained(str(ckpt_path)).to(device).eval()
+    model = MoGeModel.from_pretrained(str(ckpt_path), map_location=device).eval()
+    print(f"  [MoGe-2] 加载完成，耗时 {time.time()-t0:.1f}秒", flush=True)
 
     S, H, W, _ = frames.shape
     fov_x = math.degrees(2 * math.atan(W / (2 * 525.0)))

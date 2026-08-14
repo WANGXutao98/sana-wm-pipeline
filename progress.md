@@ -85,10 +85,140 @@ a98f9f3 docs(qc): add 面向多方评审的通俗版质检方案文档
 
 ### 待办（下次会话）
 
-1. **备份原始数据**：在 CMCC 上 rsync jdvbbfb_output 到 filestorage 或生成 md5 清单
-2. **Docker 补包**：准备 av/scenedetect/dover/UniMatch/Qwen3.5-27B 权重（见 task_plan.md 清单）
-3. **实施阶段 12**：开始 QC 代码实施（参考 `docs/superpowers/plans/2026-06-21-output-qc-system.md`）
-4. **Qwen3.5-27B 下载**：在 CMCC ModelScope 下载，存到 filestorage（~55GB）
+**优先级1**：阶段8 - 200样本验证（见 SESSION_HANDOFF.md）
+**优先级2**：阶段9 - CMCC部署（验证通过后）
+**优先级3**：阶段12 - QC系统实施（批量生产完成后）
+
+---
+
+## 2026-08-13 会话 10 — run_worker.py 多模式支持完成 ✅
+
+### 背景
+
+基于 sana-wm-data-clean 参考实现对齐工作（阶段1-3已完成），本会话完成：
+1. 修改 run_worker.py 支持三种标注模式（default/gt_depth/gt_pose）
+2. 评估当前架构与参考实现的差异对标注效果的影响
+3. 提交代码到 git 分支并更新 .gitignore
+4. 创建会话交接文档，为下一个Claude会话提供完整上下文
+
+### 完成事项
+
+#### 1. run_worker.py 多模式支持 ✅
+
+**文件**: `experiments/batch_production/run_worker.py`
+
+新增功能：
+- `--mode {default,gt_depth,gt_pose}` 参数
+- `--gt-data-dir PATH` 参数（gt模式必需）
+- `run_pose_annotation()` 调度函数（动态导入对应的 run_*()）
+- GT数据路径验证（自动检查 depth.npy 或 poses.npy）
+- `Sample.meta` 记录实际使用的 mode
+
+**向后兼容**：不指定 --mode 时默认 default 模式。
+
+**提交**: `2aa3835` - feat: add multi-mode support (default/gt_depth/gt_pose) to run_worker.py
+
+#### 2. 架构影响评估 ✅
+
+**文件**: `docs/ARCHITECTURE_IMPACT_ASSESSMENT.md` (292行)
+
+**核心结论**：
+- 核心算法100%对齐（融合、RGB签名、逐帧内参BA）
+- 架构差异（subprocess+文件IO）对正确性影响 **<1%**
+- 主要影响：调试友好性（中）、性能（中）
+
+**风险矩阵**：环境变量传递失败（低概率）、磁盘IO瓶颈（中等）、子进程OOM（1-2%）
+
+**推荐策略**：
+1. 立即执行200样本验证
+2. 根据失败率决策：<2%保持架构，>5%启动重构
+
+**提交**: `f25c83b` - docs: add architecture impact assessment
+
+#### 3. .gitignore 更新 ✅
+
+排除大文件：`models/`, `output.zip`, `testdata/`, `*.npz`, `*.tar.gz` 等22项
+
+**提交**: `39b54d7` - chore: update .gitignore to exclude large files
+
+#### 4. 用户文档编写 ✅
+
+**文件**: `docs/RUN_WORKER_MULTI_MODE_USAGE.md` (138行)
+
+包含：三种模式使用示例、GT数据结构、错误处理、性能对比
+
+**提交**: `c36be03` - docs: add multi-mode usage guide for run_worker.py
+
+#### 5. 模式对齐分析 ✅
+
+**文件**: `docs/MODE_ALIGNMENT_CRITICAL_ANALYSIS.md`
+
+记录三种模式对齐度、12/12 VIPE patches验证
+
+**提交**: `692a2ba` - docs: add mode alignment analysis and implementation plan
+
+#### 6. 会话交接文档 ✅
+
+**文件**: `SESSION_HANDOFF.md` (新建)
+
+包含：
+- 执行摘要（当前状态、下一步行动）
+- 本会话完成事项详细记录
+- 阶段8详细执行步骤（200样本验证）
+- 阶段9 CMCC部署清单
+- 技术债务记录
+- Git状态和快速命令参考
+
+### Git 提交记录
+
+**分支**: `refactor/sana-wm-align-reference-impl`
+
+**提交**（倒序）：
+```
+692a2ba docs: add mode alignment analysis and implementation plan
+c36be03 docs: add multi-mode usage guide for run_worker.py
+39b54d7 chore: update .gitignore to exclude large files
+f25c83b docs: add architecture impact assessment
+2aa3835 feat: add multi-mode support (default/gt_depth/gt_pose) to run_worker.py
+```
+
+**远程状态**: 已推送到 `origin/refactor/sana-wm-align-reference-impl` ✅
+
+### 关键文档
+
+| 文档 | 内容 | 用途 |
+|------|------|------|
+| `SESSION_HANDOFF.md` | 会话交接文档 | **下次会话入口** |
+| `docs/ARCHITECTURE_IMPACT_ASSESSMENT.md` | 架构影响评估 | 决策参考 |
+| `docs/RUN_WORKER_MULTI_MODE_USAGE.md` | 使用指南 | CMCC部署 |
+| `docs/MODE_ALIGNMENT_CRITICAL_ANALYSIS.md` | 对齐度分析 | 技术审查 |
+
+### 待办（下次会话，按优先级）
+
+#### ⚠️ 阶段8：200样本验证（最高优先级）
+
+**目标**：验证失败率从15%降至<2%
+
+**步骤**：
+1. 创建 `scripts/extract_failed_samples.py` 从历史日志提取失败样本
+2. 运行批量标注（预计2.5小时）
+3. 创建 `scripts/compare_outputs.py` 对比新旧输出
+4. 决策：<2%→CMCC部署，3-5%→调查，>5%→架构重构
+
+**详细说明**：见 `SESSION_HANDOFF.md` 第4节
+
+#### 阶段9：CMCC部署（验证通过后）
+
+**前置条件**：阶段8失败率<2%
+
+**清单**：
+1. 同步代码到CMCC（`git checkout refactor/sana-wm-align-reference-impl`）
+2. 预检环境（`launch_all_nodes.sh --check-only`）
+3. 多节点启动（6节点+4节点分组）
+
+#### 阶段12：QC系统实施（批量生产完成后）
+
+参考：`docs/superpowers/plans/2026-06-21-output-qc-system.md`
 
 ---
 

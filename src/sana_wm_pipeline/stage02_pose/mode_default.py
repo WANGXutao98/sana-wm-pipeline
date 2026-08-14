@@ -162,10 +162,26 @@ def _load_vipe_artifacts(clip_path: Path, vipe_out: Path) -> PoseArtifact:
     intrinsics_raw = intr_data["data"].astype(np.float32)  # (T, 4) [fx,fy,cx,cy]
     intr_inds = intr_data["inds"]
 
-    # VIPE may only write keyframe poses; interpolate to full T frames.
-    T_full = int(pose_inds.max()) + 1
-    poses_c2w = _interp_poses(poses_c2w, pose_inds, T_full)
-    intrinsics_full = _interp_intrinsics(intrinsics_raw, intr_inds, T_full)
+    # 直接使用VIPE输出（与sana-wm-data-clean/vipe_cli.py:_load_vipe_pose对齐）
+    # 参考: vipe_cli.py:61-70 _load_vipe_pose()
+    # 逻辑: 只按inds排序，不做稀疏化/插值
+    # 理由: 参考实现没有稀疏化逻辑，稀疏化+插值会丢失VIPE BA优化的信息
+    order = np.argsort(pose_inds)
+    poses_c2w = poses_c2w[order]
+    pose_inds_sorted = pose_inds[order]
+
+    order_intr = np.argsort(intr_inds)
+    intrinsics_raw = intrinsics_raw[order_intr]
+    intr_inds_sorted = intr_inds[order_intr]
+
+    # VIPE输出的帧数就是最终帧数（不插值到T_full）
+    T_full = len(poses_c2w)
+
+    print(f"[mode_default] Loaded {T_full} frames from VIPE (aligned with reference)")
+    print(f"[mode_default]   Pose indices: {pose_inds_sorted[:min(5, T_full)].tolist()} ... {pose_inds_sorted[-min(5, T_full):].tolist()}")
+
+    # 参考实现的intrinsics处理逻辑（vipe_cli.py:73-100 _load_perframe_intrinsics）
+    intrinsics_full = _interp_intrinsics_aligned(intrinsics_raw, T_full)
 
     # Reshape intrinsics to (T, 1, 4) as required by PoseArtifact.
     intrinsics_nvd = intrinsics_full[:, None, :]  # (T, 1, 4)
@@ -219,25 +235,36 @@ def _load_vipe_artifacts(clip_path: Path, vipe_out: Path) -> PoseArtifact:
     return artifact
 
 
-def _interp_poses(poses: np.ndarray, inds: np.ndarray, T: int) -> np.ndarray:
-    """Nearest-neighbour fill from keyframe poses to dense T frames."""
-    out = np.zeros((T, 4, 4), dtype=np.float32)
-    for i in range(4):
-        for j in range(4):
-            out[:, i, j] = np.interp(np.arange(T), inds, poses[:, i, j])
-    # Ensure first frame is identity (paper App. D.3).
-    if not np.allclose(out[0], np.eye(4), atol=1e-3):
-        T0_inv = np.linalg.inv(out[0])
-        out = (T0_inv[None] @ out)
-    return out.astype(np.float32)
+def _interp_intrinsics_aligned(intr: np.ndarray, n_target: int) -> np.ndarray:
+    """Align intrinsics to target frame count (与vipe_cli.py:_load_perframe_intrinsics对齐).
 
+    参考: sana-wm-data-clean/sana_wm_data/pose/vipe_cli.py:73-100
 
-def _interp_intrinsics(intr: np.ndarray, inds: np.ndarray, T: int) -> np.ndarray:
-    """Linear interpolation of [fx,fy,cx,cy] to T frames."""
-    out = np.zeros((T, 4), dtype=np.float32)
-    for k in range(4):
-        out[:, k] = np.interp(np.arange(T), inds, intr[:, k])
-    return out.astype(np.float32)
+    Args:
+        intr: (K, 4) [fx,fy,cx,cy]
+        n_target: 目标帧数N
+
+    Returns:
+        (N, 4) intrinsics
+
+    Logic:
+        K == N: 直接使用
+        K == 1: broadcast到N帧
+        1 < K < N: 线性插值到N帧
+    """
+    if intr.ndim == 1:
+        intr = intr[None, :]
+    K = intr.shape[0]
+
+    if K == n_target:
+        return intr
+    if K == 1:
+        return np.tile(intr[0], (n_target, 1))
+
+    # 1 < K < N: 线性插值
+    src = np.linspace(0.0, 1.0, K)
+    dst = np.linspace(0.0, 1.0, n_target)
+    return np.stack([np.interp(dst, src, intr[:, j]) for j in range(4)], axis=1).astype(np.float32)
 
 
 def _try_load_depth_downsampled(

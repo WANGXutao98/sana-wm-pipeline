@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
-"""从SpatialVID-hq tar包中选择帧数最短的N个样本
+"""从SpatialVID-hq tar包中随机选择N个样本
 
 用法:
     python scripts/select_shortest_samples.py \\
         /path/to/SpatialVID-hq-000000.tar \\
-        --num-samples 3 \\
+        --num-samples 10 \\
         --output /tmp/selected_samples.txt
 """
 import argparse
+import random
 import tarfile
 from pathlib import Path
 import numpy as np
 
 
 def main():
-    parser = argparse.ArgumentParser(description="选择最短的N个样本")
+    parser = argparse.ArgumentParser(description="随机选择N个样本")
     parser.add_argument("tar_path", type=Path, help="输入tar包路径")
-    parser.add_argument("--num-samples", type=int, default=3, help="选择样本数量")
+    parser.add_argument("--num-samples", type=int, default=10, help="选择样本数量")
     parser.add_argument("--output", type=Path, required=True, help="输出文件路径")
+    parser.add_argument("--seed", type=int, default=42, help="随机种子")
     args = parser.parse_args()
+
+    random.seed(args.seed)
 
     # 收集所有样本及其帧数
     samples = []
@@ -42,13 +46,10 @@ def main():
 
             samples.append((sample_id, n_frames))
 
-    # 按帧数排序
-    samples.sort(key=lambda x: x[1])
+    # 随机选择N个
+    selected = random.sample(samples, min(args.num_samples, len(samples)))
 
-    # 选择最短的N个
-    selected = samples[:args.num_samples]
-
-    print(f"\n选中的{args.num_samples}个最短样本:")
+    print(f"\n随机选中{len(selected)}个样本:")
     for sample_id, n_frames in selected:
         print(f"  {sample_id}: {n_frames} 帧")
 

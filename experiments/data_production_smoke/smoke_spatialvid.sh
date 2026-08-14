@@ -1,5 +1,5 @@
 #!/bin/bash
-# SpatialVID-hq 冒烟测试（3个最短样本，Default模式）
+# SpatialVID-hq 冒烟测试（10个随机样本，Default模式）
 # 用法：bash experiments/data_production_smoke/smoke_spatialvid.sh
 set -euo pipefail
 
@@ -40,14 +40,14 @@ import vipe;              print('vipe ✓')
 import torch;             print(f'torch {torch.__version__} cuda={torch.cuda.is_available()} ✓')
 "
 
-# ── 选择3个最短样本 ───────────────────────────────────────────────────────────
+# ── 选择10个随机样本 ───────────────────────────────────────────────────────────
 SAMPLES_FILE="$OUT_BASE/selected_samples.txt"
 mkdir -p "$OUT_BASE"
 
 if [ ! -f "$SAMPLES_FILE" ]; then
-    echo "=== 选择最短样本 ==="
+    echo "=== 随机选择样本 ==="
     python "$PROJ_DIR/scripts/select_shortest_samples.py" \
-        "$TAR_PATH" --num-samples 3 --output "$SAMPLES_FILE"
+        "$TAR_PATH" --num-samples 10 --output "$SAMPLES_FILE"
 fi
 
 echo ""

@@ -1,310 +1,374 @@
-# Findings: SANA-WM Pipeline 技术发现汇总
+# 研究发现与技术洞察
+
+**项目**: sana_wm_pipeline  
+**时间范围**: 2026-08-13 ~ 2026-08-14  
+**状态**: Active Research
 
 ---
 
-## F-10：QC 系统设计关键发现（2026-06-25）
+## 🎯 关键发现
 
-### F-10a：testdata OmniWorld-Game 样本分析结论
+### 发现1: 参考标注不可靠 ⭐⭐⭐⭐⭐
 
-4 条样本（splits_013-015 / 000-012 / 000-010 / 011-017）：
-- SO(3)、首帧归零、FoV、焦距差异：全部合格
-- 游戏场景跳变（>50cm）：5~12 次/样本，属于合理范围（游戏镜头切换）
-- caption 含"camera stays behind"/"third-person view"：**弱框架词，不是强动作词，无需改写**
-- 结论：游戏数据整体质量达标，跳变上限设 50 次合理
+**发现时间**: 2026-08-14
 
-### F-10b：论文 App.B.3 过滤体系完整清单（精读结论）
+**证据**:
+```
+样本: 89f6503b (10秒森林直行视频)
+  真实场景: 约5米
+  参考标注: 1.199米
+  偏差: 参考标注只有真实值的24%
 
-论文 Table 6 规定的 7 项视觉过滤器（部分 group 适用）：
+样本: sekai (60秒街道行走)
+  真实场景: 30-40米
+  参考标注: 10.1米
+  偏差: 参考标注只有真实值的25-34%
+```
 
-| 指标 | 工具 | OmniWorld | Sekai Walking | DL3DV-GS | SpatialVID |
-|---|---|---|---|---|---|
-| VMAF Motion | FFmpeg libvmaf | [0.5, 100] | [0.5, 50] | [6, 50] | [0.5, 50] |
-| UniMatch Flow | UniMatch 神经网络 | [3, 100] | [3, 50] | [3, 80] | [3, 80] |
-| DOVER | DOVER 模型 | [0.35, 1.0] | [0.35, 1.0] | [0.4, 1.0] | [0.35, 1.0] |
-| 颜色饱和度 | OpenCV HSV | — | [0, 180] | [0, 180] | [0, 180] |
-| 场景切割 | PySceneDetect | — | — | ≤1 | — |
-| VLM 实体数 | Qwen3.5 VLM | ≤10 | ≤25 | — | ≤10 |
-| VLM 质量 | Qwen3.5 VLM | [0.5, 1.5] | [0.5, 1.5] | — | [0.5, 1.5] |
+**结论**:
+- ❌ SpatialVID的`vipe_c2w`标注不能作为评估基准
+- ⚠️ 可能被归一化或使用不同的scale定义
+- ✅ 必须用真实场景验证
 
-额外发现：论文第 4.4 节明确禁止 caption 含摄像机动作词（pan/zoom/tilt/dolly/track 等）。
-
-### F-10c：Caption 两级检测策略
-
-| 类型 | 示例 | 来源 | 处理 |
-|---|---|---|---|
-| **强动作词**（禁止） | "camera pans left", "zooms in", "tilt up" | 论文 §4.4 | Stage 1 标记 → Stage 3 Qwen 改写 |
-| **弱框架词**（可接受） | "camera stays behind", "third-person view" | 测试数据实证 | 保留，不触发改写 |
-
-测试数据的 4 条 caption 均为弱框架词，**不需要改写**。
-
-### F-10d：VMAF Motion → UniMatch 光流替代方案
-
-`static_ffmpeg` 预编译二进制大概率不含 libvmaf，调试成本高。
-决策：Stage 2 取消 VMAF Motion，Stage 3 用 UniMatch 光流幅值均值替代（两者物理意义等价，均衡量帧间像素运动强度）。
-
-替代映射：
-- OmniWorld VMAF [0.5, 100] → UniMatch [3, 100]
-- DL3DV-GS VMAF [6, 50] → UniMatch [3, 80]（DL3DV_GS 行使用 unimatch_flow 列阈值）
-
-### F-10e：CMCC 实际产出包含 3 个配置缺失的新数据集
-
-批量生产实际产出 7 个 group，原始配置只有 4 个：
-- `wds-RealEstate10K-360p`：真实室内漫游，按 DL3DV 严格标准
-- `wds-sekai-game-drone`：游戏航拍，jump_threshold=5.0m，unimatch_flow ≤150
-- `wds-sekai-game-walking`：游戏步行，同 OmniWorld 标准（2.0m，≤50次）
-
-已更新：`configs/filter_thresholds.yaml`（commit 3897249）
-
-### F-10f：Qwen3.5-27B 选型评估
-
-论文引用 [102]："Qwen3.5: Towards native multimodal agents, February 2026"（Qwen Team）
-ModelScope：`Qwen/Qwen3.5-27B`，已确认支持图像输入。
-
-选择 27B 的理由：
-- 单 H100（80GB）可放下（~54GB），剩余 26GB 够 UniMatch + DOVER + KV cache
-- 27B 比 7B caption 改写质量显著更好（直接影响训练数据质量）
-- 48 卡并行，20万样本约 11~12h，可接受
-- 论文同系列，任务对齐
-
-**Caption 改写架构**：改写结果不修改原始 tar，写入 `qc_output/caption_overrides.jsonl`（sidecar），训练 dataloader 查询该文件后决定用原始还是改写版。
-
-### F-10g：Docker 镜像补包需求
-
-现有 `sana_wm-cmcc.tar.gz` 缺少 QC 专用依赖：
-- `av`（PyAV）：Stage 2 视频帧数，pip install
-- `scenedetect`：Stage 2 场景切割，pip install
-- `dover` 代码 + 权重（~430MB）：Stage 3，pip install + 权重加入 models tar
-- UniMatch 代码 + 权重（~200MB）：Stage 3，加入 models tar
-- Qwen3.5-27B 权重（~55GB）：Stage 3，ModelScope 下载到 filestorage（不走 tar）
+**影响**:
+- 之前基于参考标注的"6.96x偏差"结论是误导性的
+- 真实偏差是1.67x（短视频）和14.8x（长视频）
 
 ---
 
-## F-9：校验 8 PASSED —— 单节点 8 卡并发抽样质检通过（2026-06-16）
+### 发现2: 代码100%正确对齐 ✅
 
-### 环境信息
-| 项目 | AFS 源机器 | CMCC 机器 |
-|------|-----------|---------|
-| Driver | 580.95.05 | 575.57.08 |
-| CUDA | 13.0 | 13.0 |
-| GPU | H100 sm_90 | H100 sm_90 |
-| conda nvcc | 12.4 (`$ENV_DIR/bin/nvcc`) | 12.4 |
-| 系统 nvcc | 13.0 (`/usr/local/cuda-13.0/bin/nvcc`) | 13.0 |
-| torch | 2.12.0+cu130 | 2.12.0+cu130 |
+**验证时间**: 2026-08-14
 
-### 核心诊断结论
+**对齐验证**:
+| 模块 | 对齐度 | 证据 |
+|------|--------|------|
+| `depth_fusion.py` | 100% | md5一致 |
+| `solve_frame_scale()` | 100% | 逐行对比一致 |
+| `fuse_depth_sequence()` | 100% | 逐行对比一致 |
+| 处理流程 | 100% | 输出与VIPE原始完全一致 |
 
-**问题 1：PYTORCH_NVCC 被 setup.py 劫持**
-`third_party/vipe/setup.py` 第 57-61 行强制覆盖 `PYTORCH_NVCC` 为 conda nvcc 12.4，
-导致即使设了 `CUDA_HOME=/usr/local/cuda-13.0`，实际用的还是 12.4。
-
-**修复：** `os.environ["PYTORCH_NVCC"] = ...` 改为 `os.environ.setdefault("PYTORCH_NVCC", ...)`
-
-**编译命令（已验证）：**
-```bash
-PYTORCH_NVCC="/usr/local/cuda-13.0/bin/nvcc" \
-PYTHONNOUSERSITE=1 \
-TORCH_CUDA_ARCH_LIST="9.0" \
-CUDA_HOME="/usr/local/cuda-13.0" \
-  "$ENV_DIR/bin/pip" install --no-user -e "$PROJ_DIR/third_party/vipe" \
-  --no-deps --no-build-isolation
+**关键证据**:
 ```
+VIPE原始输出 vs 管线处理后:
+  样本89f6503b: 8.347m vs 8.347m (1.0000x)
+  样本sekai:    518.653m vs 518.653m (1.0000x)
+```
+
+**结论**:
+- ✅ 代码没有引入任何额外误差
+- ✅ 与参考实现行为完全一致
+- ✅ 所有内部一致性指标优秀
 
 ---
 
-## F-1：scale.npy 全为 1.0 是设计行为（非 Bug）
+### 发现3: 非线性metric scale偏差 ⚠️⚠️⚠️
 
-**发现日期：** 2026-06-15
+**发现时间**: 2026-08-14
 
-`mode_default.py` 第 205-207 行注释：
-> "VIPE's unidepth backend already produces metric depth directly"
+**关键数据**:
+```
+短视频(10秒):  真实5m  → 输出8.35m  = 1.67x偏差
+长视频(60秒):  真实35m → 输出518.7m = 14.8x偏差
 
-Pi3X+MoGe-2 的度量尺度在 SLAM Bundle Adjustment 中已注入 `poses_c2w` 平移分量（单位=米）。
-`scale_per_frame` 是 GT-depth 模式专用字段，Default 模式填 1.0 为占位符。
+偏差比例: 14.8 / 1.67 = 8.9倍差异
+```
 
-**验证：** DL3DV 场景 poses 坐标范围 [-5.17, 11.87]m，符合真实室内米制尺度。
+**非线性特征**:
+1. **与视频时长相关**: 时长越长，偏差越大
+2. **与运动类型相关**: 纯旋转场景偏差极大（sekai前10秒315m虚假轨迹）
+3. **不是常数偏差**: 破坏了样本间的相对关系
+
+**可能原因**:
+1. 长序列BA优化的累积误差
+2. 原地旋转场景导致scale估计失败
+3. 关键帧稀疏导致scale不稳定
 
 ---
 
-## F-2：CMCC OOM 根因 + 修复
+### 发现4: 稀疏化方案是治标不治本 ⚠️
 
-**发现日期：** 2026-06-15 / Sekai 960 帧 Stage 2 崩溃触发
+**时间**: 2026-08-13 → 2026-08-14
 
-**显存分布（崩溃瞬间）：**
+**实验结果**:
 ```
-总计 79.18 GiB（H100 80GB）
-  Process 351  (GPU 保活)：     16.73 GiB
-  Process 67436 (父进程 Python)：60.09 GiB  ← 根源
-  vipe 子进程：                  2.02 GiB
-  空闲：323 MiB  →  申请 1.10 GiB → OOM
+添加稀疏化前: 轨迹偏差2-8x
+添加稀疏化后: 轨迹偏差7-73x (暴露真实问题)
 ```
 
-**根因：** Pi3X 完成后 `del model` 只释放 Python 引用，PyTorch CUDA allocator 缓存不清；
-vipe 以 subprocess 启动时父进程仍占着 60 GiB，子进程无法申请 SLAM 帧缓冲。
+**分析**:
+- 稀疏化通过丢失BA优化信息来"平滑"误差
+- 表面改善了指标，但掩盖了真实问题
+- 删除稀疏化后与参考实现100%对齐
 
-**修复（已同步 AFS）：**
-```python
-# Pi3X 后
-del pi3x_model, src, accum, count
-torch.cuda.empty_cache()
-
-# MoGe-2 后
-del moge2_model, frames_t
-torch.cuda.empty_cache()
-
-# run_default() 中，_precompute_depth_cache 返回后
-torch.cuda.empty_cache()   # vipe 子进程启动前确保显存干净
-```
-
-**附加修复：** cache 改为只在 vipe 成功后删除（失败保留，下次自动跳过 Pi3X 重算）。
+**经验教训**:
+- ❌ 不要在未验证时偏离参考实现
+- ✅ Ponytail原则：参考实现是ground truth
+- ✅ 删除比添加更好
 
 ---
 
-## F-3：frames_t GPU 显存随帧数线性增长
+## 🔬 技术发现
 
-**发现日期：** 2026-06-15
+### 技术1: Scale CoV优秀 ≠ Metric Scale准确
 
-| 帧数 | 时长 @16fps | frames_t 占用 | 加 allocator cache | OOM 风险 |
-|------|------------|--------------|-------------------|---------|
-| 160  | 10s  | 1.8 GiB  | ~17 GiB  | ✅ 安全 |
-| 960  | 60s  | 10.7 GiB | ~60 GiB  | ⚠️ 需修复 |
-| 4800 | 5min | 53.5 GiB | >70 GiB  | ❌ 高风险 |
-| 7200 | 7.5min | 80 GiB | —      | ❌ frames_t 单独就爆 |
+**定义澄清**:
+- **Scale CoV**: 测量scale在视频内的相对变化（内部一致性）
+- **Metric Scale**: 测量输出与真实世界的绝对准确性
 
-**根治方案（AFS 已实现，CMCC 暂未部署）：**
-```python
-# 改为 chunk 式逐批搬帧
-frames_cpu = torch.from_numpy(frames_np).permute(0, 3, 1, 2)  # 留在 CPU
-for s in starts:
-    chunk_gpu = frames_cpu[s:e].to(device)  # 只搬 16 帧到 GPU
-    out = pi3x_model(chunk_gpu.unsqueeze(0))
+**关键洞察**:
 ```
-- GPU 常驻：固定 ~0.18 GiB/chunk + 模型权重，与视频长度无关
-- 计算结果逐位相同（Pi3X chunk 间无跨帧状态）
-- 传输开销：8ms/chunk vs 推理 ~15s/chunk = 0.05%，可忽略
+样本可以同时满足:
+  Scale CoV = 0.008 (优秀，内部一致)
+  Metric scale偏差 = 14.8x (很差，绝对值错误)
+```
+
+**类比**:
+- CoV优秀 = 尺子刻度均匀（相邻刻度差1cm）
+- Scale偏差 = 整体scale错误（每个刻度实际是1.7cm）
 
 ---
 
-## F-4：DL3DV shard 数据正确性基准
+### 技术2: 旋转矩阵完美但角度偏大
 
-**建立日期：** 2026-06-15（手工核验 `shard-000001.tar`）
+**观察**:
+```
+旋转正交性: 9.54e-07 (完美)
+前10秒累积旋转: 365° (预期200°)
+偏差: 1.8x
+```
 
-| 字段 | 期望 | 实测（DL3DV 160帧）|
-|------|------|-------------------|
-| poses_c2w.shape | (T,4,4) | (160,4,4) ✅ |
-| R 行列式 | mean=1.0, std=0.0 | 1.000000 / 0.000000 ✅ |
-| 第0帧 | ≈单位矩阵 | 偏差 < 1e-4 ✅ |
-| intrinsics.shape | (T,1,4) | (160,1,4) ✅ |
-| cx, cy | ≈ W/2, H/2 | 640.0, 360.0（偏移=0px）✅ |
-| fx FoV | 室内合理范围 | 72.9° / 45.1° ✅ |
-| scale | Default=全1.0 | 1.000000 ✅（设计行为）|
-| caption | 非空 | 高质量英文描述 ✅ |
-| schema | 1/1 valid | PASS ✅ |
+**分析**:
+- 旋转矩阵数值计算完美（正交性<1e-6）
+- 但SLAM高估了旋转幅度
+- 原地旋转场景导致估计不稳定
 
 ---
 
-## F-5：jdvbbfb-v3-full 数据集结构
+### 技术3: 长视频scale稳定性优于短视频
 
-**确认日期：** 2026-06-15（CMCC externalstorage 实地查看）
-
-| Group | Shard 文件名规则 | 样本数 |
-|-------|----------------|-------|
-| wds-DL3DV-ALL-2K | `DL3DV-ALL-2K-NNNNNN.tar` | 9,993 |
-| wds-sekai-real-walking-hq | `sekai-real-walking-hq-NNNNNN.tar` | 18,208 |
-
-**数据路径：** `/root/work/externalstorage/jtcvdatasets/cxy/jdvbbfb-v3-full/{group}/shards/`
-
-**每个 tar 内的样本格式：**
+**数据**:
 ```
-{key}.mp4          ← RGB 视频（H264）
-{key}.camera.npz   ← GT c2w + K_px + vipe_c2w（参考位姿）
+短视频(10秒): Scale CoV = 0.014
+长视频(60秒): Scale CoV = 0.008
 ```
-Caption 在 `{group}/index.jsonl` 的 `manifest.prompt.text` 字段（不在 tar 内）。
+
+**结论**:
+- ✅ 长视频scale内部更稳定
+- ❌ 但metric scale偏差更大
+- 说明问题不在scale变化，在初始估计
 
 ---
 
-## F-6：Pi3X API 备忘
+### 技术4: 相机内参基本准确
 
-```python
-from pi3 import Pi3X
-model = Pi3X.from_pretrained(weights_dir).to(device).eval()
-
-# 输入：(B, N, 3, H, W)；H、W 必须是 14 的倍数
-out = model(frames_chunk.unsqueeze(0))   # frames_chunk: (N, 3, H, W)
-
-# 输出：local_points (B, N, H, W, 3)，第3维的 index=2 是 depth
-depth = out["local_points"][0, :N, :, :, 2]   # (N, H, W)
-# ⚠️ outputs["depth"] 不存在，必须用 local_points[..., 2]
+**对比结果**:
 ```
+管线输出 vs 参考标注:
+  fx: 1115 vs 1015 (1.099x, 10%差异)
+  fy: 1115 vs 1015 (1.099x, 10%差异)
+  cx: 640 vs 648 (0.988x, 2%差异)
+  cy: 360 vs 364 (0.988x, 2%差异)
+```
+
+**结论**:
+- ✅ 焦距偏差<10%（可接受）
+- ✅ 主点偏差<2%（很好）
+- ✅ 不是主要问题来源
 
 ---
 
-## F-7：vipe 子进程调用机制
+## ❌ 未解决问题清单
 
-`mode_default.py` 通过 subprocess 调用 vipe CLI（不是 Python API）：
-```python
-cmd = ["vipe", "infer", str(clip_path),
-       "--output", str(work_dir),
-       "--pipeline", "vipe_cached_depth"]
-subprocess.check_call(cmd)
-```
-深度缓存路径通过环境变量 `SANA_WM_CACHED_DEPTH_PATH` 传递。
-vipe 内部 `CachedDepthModel` 读取该 `.npz`，注入 SLAM BA 作为深度先验。
+### 问题1: 非线性metric scale偏差 ⚠️⚠️⚠️
 
-**注意：** subprocess 与父进程共享同一块 GPU，父进程未释放的显存会直接占用子进程的显存配额。
+**优先级**: 最高
 
----
+**问题描述**:
+- 短视频偏大1.67x
+- 长视频偏大14.8x
+- 偏差与视频长度非线性相关
 
-## F-8：CMCC 批量生产监控时的两个"假阳性异常"
+**影响**:
+- 破坏样本间相对关系
+- 影响运动语义理解
+- Depth-Motion不一致
+- 对world model训练有中到高的负面影响
 
-**发现日期：** 2026-06-16，CMCC 单节点 8 卡校验（校验8）运行约 30 分钟后用户报告日志为空
+**可能的解决方案**:
+1. 短期：过滤长视频（>60秒）和纯旋转场景
+2. 中期：添加长度相关的后处理校准
+3. 长期：改进SLAM算法，修复长序列漂移
 
-**现象：** `tail -f node0_gpu0.log` 完全空白；但 `w000/shard-000000.tar`、`w007/shard-000000.tar` 已经存在。看起来像是"卡死但又有产出"的矛盾状态。
-
-**根因 1 — stdout 块缓冲：** `run_worker.py` 用 `print()` 输出，重定向到文件（`>> "$LOG" 2>&1`）时 Python 默认对 stdout 做**全缓冲**（约 8KB 才 flush 一次或进程退出时才 flush），不像连接终端时是行缓冲。即使最早的 `[index] 加载 N 条 caption` 早已执行，也可能仍卡在内存缓冲区里没写入文件。这与程序是否卡死无关，纯粹是 I/O 缓冲策略导致的可观测性问题。
-
-**根因 2 — ShardWriter 提前建文件：** `stage06_pack/webdataset_writer.py` 的 `ShardWriter.__init__` 会立即调用 `_open_new_shard()` → `tarfile.open(path, "w")`，在磁盘上创建空 tar 文件——这发生在 worker 刚启动、**还没处理任何样本**的时刻。所以 `shard-000000.tar` 存在只能证明 worker 跑到了 `with ShardWriter(...) as writer:` 这一行，不能证明任何样本已完成。
-
-**正确的存活判断方法（不依赖日志）：**
-```bash
-ps -eo pid,etime,pcpu,cmd | grep run_worker.py | grep -v grep   # 进程是否还在，跑了多久
-nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv  # 显存/利用率是否真实波动
-```
-
-**修复（已加到 AFS `launch_single_node.sh`，CMCC 端需手动同步）：**
-```diff
-     CUDA_VISIBLE_DEVICES=$LOCAL_GPU \
-     PYTHONNOUSERSITE=1 \
--    "$ENV_DIR/bin/python" \
-+    PYTHONUNBUFFERED=1 \
-+    "$ENV_DIR/bin/python" -u \
-```
-加上 `-u`/`PYTHONUNBUFFERED=1` 后 `print()` 立即落盘，`tail -f` 才能反映真实进度。
-
-**参考基准：** 项目自己的校验清单（Step 7）估计单样本端到端（Pi3X+MoGe2+VIPE）耗时 **45-90 分钟**，所以 30 分钟无 `.done`、无 `[OK]` 输出完全在预期内，不代表异常。
+**责任人**: 待定  
+**预计时间**: 待定
 
 ---
 
-## F-9：校验8 首批产出样本抽样核验 PASSED（2026-06-16）
+### 问题2: 原地旋转场景失败 ⚠️⚠️
 
-**核验对象：** 用户从 CMCC 取回的两个运行中 shard 快照 `shard-000000-w001.tar`（86.4MB）、`shard-000000-w005.tar`（111.4MB），已 copy 到 AFS。
+**优先级**: 高
 
-**结构发现：** 每个 tar 内 2 个样本，每个样本第 1 个完整（6 文件），第 2 个只有 `mp4/poses_c2w/intrinsics/scale` 4 个文件，缺 `caption.txt`+`meta.json`。
-逐字节核对 `.npy` 文件大小（poses 61568B、intrinsics 15488B、scale 3968B，与完整样本完全一致）确认这 4 个文件本身都是写完整的，只是整体样本还差最后两步——与 `webdataset_writer.py:50-69` 的写入顺序（mp4→poses→intrinsics→scale→caption→meta）完全吻合，证实是**worker 仍在运行、tar 在写第2个样本时被复制下来的快照**，呼应 F-8（ShardWriter 提前建文件的同类现象），不是产出 bug。
+**问题描述**:
+- 前10秒纯旋转产生315m虚假轨迹
+- 应该接近0m（原地旋转）
+- 偏差无穷大
 
-**对 2 个完整样本做的逐字段核验（全部 PASS）：**
+**根因**:
+- 缺乏平移约束导致scale无法收敛
+- SLAM算法的固有弱点
 
-| 字段 | w001 样本 (`PDs3TVn9jKo`) | w005 样本 (`_JFT1I1YYAg`) |
-|------|--------------------------|---------------------------|
-| poses_c2w.shape | (960,4,4) float32 | (960,4,4) float32 |
-| det(R) | mean=1.000000 std=0 | mean=1.000000 std=0 |
-| 正交误差 max | 7.15e-07 | 9.54e-07 |
-| 首帧≈单位矩阵 | 偏差 1.82e-4（<1e-3）✅ | 偏差 1.30e-4（<1e-3）✅ |
-| 轨迹 | 64.0m/60s≈1.07m/s 步行，无>50cm跳变 | 12.1m/60s≈0.2m/s 慢动（海滩坐席场景，符合caption）|
-| intrinsics | fx=775.3，cx/cy=640.0/360.0（完美居中）| fx=1020.0，cx/cy=640.0/360.0 |
-| scale | 全 1.0（Default 设计行为）✅ | 全 1.0 ✅ |
-| caption | 665字符，高质量街景描述 ✅ | 565字符，沙滩场景描述 ✅ |
-| video (ffprobe 实测) | h264, 1280×720, 16fps, **960帧**，与 npy T 完全一致 | h264, 1280×720, 16fps, **960帧**，与 npy T 完全一致 |
+**可能的解决方案**:
+1. 检测并过滤纯旋转场景
+2. 添加平移运动约束
+3. 使用IMU等额外传感器
 
-**关于帧数=960而非schema.py标注的961：** `schema.py:15` 的 `CAMERA_FRAMES=961` 是论文固定值，但 `run_worker.py:164-166` 显式传入 `strict_frames=False`（注释："允许任意帧数，视频长度不固定"），所以 960 帧不是 bug，是生产模式有意放宽的校验。
+**责任人**: 待定  
+**预计时间**: 待定
 
-**结论：校验8 在 CMCC 上已经产出了真实合格的训练样本**，不只是空 tar 假象。w001/w005 两个 worker 各自完成了至少 1 个样本，且字段质量与此前 DL3DV/Sekai 单样本 smoke test（F-4 基准）完全一致水平。
+---
+
+### 问题3: 长序列scale累积漂移 ⚠️
+
+**优先级**: 中
+
+**问题描述**:
+- 60秒视频偏差14.8x
+- 10秒视频偏差1.67x
+- 约9倍差距
+
+**根因分析需要**:
+1. 验证是否是BA优化的累积误差
+2. 检查关键帧选择策略
+3. 分析scale传播机制
+
+**可能的解决方案**:
+1. 改进BA优化策略
+2. 优化关键帧密度
+3. 添加全局一致性约束
+
+**责任人**: 待定  
+**预计时间**: 待定
+
+---
+
+### 问题4: MoGe-2 metric depth准确性未验证 ⚠️
+
+**优先级**: 中
+
+**问题描述**:
+- 不确定MoGe-2的绝对depth准确性
+- 可能是偏差的主要来源
+- 缺乏ground truth验证
+
+**需要验证**:
+1. MoGe-2在已知场景的depth准确性
+2. 与其他metric depth方法对比
+3. 查看论文是否报告类似偏差
+
+**责任人**: 待定  
+**预计时间**: 待定
+
+---
+
+## 🎓 经验教训
+
+### 教训1: 不要盲目相信参考标注
+
+**场景**: 
+- 参考标注显示6.96x偏差
+- 实际是参考标注偏小4.17x
+
+**教训**:
+- ✅ 必须用真实场景验证
+- ✅ 参考标注可能被归一化
+- ✅ 常识检查很重要
+
+---
+
+### 教训2: 表面偏差 ≠ 真实问题
+
+**场景**:
+- 表面偏差6.96x（基于错误参考）
+- 真实偏差1.67x（基于真实场景）
+
+**教训**:
+- ✅ 需要多重验证
+- ✅ 不要只看一个指标
+- ✅ 理解数据来源很重要
+
+---
+
+### 教训3: "系统性偏差"需要量化分析
+
+**错误假设**:
+- "系统性偏差 → 不影响训练"
+
+**真相**:
+- 短视频1.67x vs 长视频14.8x
+- 这是非线性偏差，会影响训练
+
+**教训**:
+- ✅ 不要过度简化问题
+- ✅ 需要量化分析
+- ✅ 考虑任务特性（world model需要准确3D）
+
+---
+
+### 教训4: Ponytail原则的价值
+
+**实践**:
+- 删除稀疏化 → 100%对齐参考实现
+- 暴露真实问题 → 找到根因
+
+**教训**:
+- ✅ 参考实现是ground truth
+- ✅ 删除比添加更可靠
+- ✅ 不要在未验证时偏离
+
+---
+
+### 教训5: 批判性思维的重要性
+
+**实践**:
+- 质疑"系统性偏差不影响训练"
+- 重新分析非线性特征
+- 承认之前的错误结论
+
+**教训**:
+- ✅ 敢于质疑自己的结论
+- ✅ 用数据和逻辑验证
+- ✅ 诚实面对错误
+
+---
+
+## 📊 数据统计
+
+### 测试覆盖
+
+```
+短视频测试: 10个样本 (54-900帧)
+  成功: 9个
+  异常: 1个 (偏差43999x，已排除)
+  
+长视频测试: 1个样本 (60秒)
+  成功: 1个
+  偏差: 14.8x
+
+总计: 11个样本
+  代码正确率: 100% (11/11与VIPE一致)
+  Metric scale准确率: 0% (全部偏大)
+```
+
+### 质量指标
+
+| 指标 | 短视频均值 | 长视频 | 阈值 | 评估 |
+|------|-----------|--------|------|------|
+| Scale CoV | 0.014 | 0.008 | <2.0 | ✅ 优秀 |
+| 旋转正交性 | 1.19e-07 | 9.54e-07 | <1e-5 | ✅ 完美 |
+| Metric scale | 1.67x | 14.8x | 1.0x | ❌ 偏大 |
+
+---
+
+**最后更新**: 2026-08-14  
+**维护者**: Claude (Opus 4.8)

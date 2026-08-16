@@ -6,8 +6,12 @@ set -euo pipefail
 export PROJ_DIR="/mnt/afs/davidwang/workspace/sana_wm_pipeline"
 export ENV_DIR="/mnt/afs/davidwang/miniconda3/envs/sana_wm"
 export OUT_BASE="/mnt/afs/davidwang/workspace/sana_test_data/smoke_result"
-export VIDEO_PATH="/mnt/afs/davidwang/workspace/sana_test_data/sekai-real-walking/sekai-real-walking-hq__FP8j6WfkTY_0085528_0087328.mp4"
-export CAMERA_PATH="/mnt/afs/davidwang/workspace/sana_test_data/sekai-real-walking/sekai-real-walking-hq__FP8j6WfkTY_0085528_0087328.camera.npz"
+#export VIDEO_PATH="/mnt/afs/davidwang/workspace/sana_test_data/sekai-real-walking/sekai-real-walking-hq__FP8j6WfkTY_0085528_0087328.mp4"
+export VIDEO_PATH="/mnt/afs/davidwang/workspace/sana_test_data/sekai-real-walking/sekai-real-walking-hq_3aFIYNiOBlg_0081182_0082982.mp4"
+
+#export CAMERA_PATH="/mnt/afs/davidwang/workspace/sana_test_data/sekai-real-walking/sekai-real-walking-hq__FP8j6WfkTY_0085528_0087328.camera.npz"
+export CAMERA_PATH="/mnt/afs/davidwang/workspace/sana_test_data/sekai-real-walking/sekai-real-walking-hq_3aFIYNiOBlg_0081182_0082982.camera.npz"
+
 
 # ── 模型权重 ──────────────────────────────────────────────────────────────────
 export SANA_WM_PI3X_WEIGHTS="/mnt/afs/davidwang/models/pi3x"

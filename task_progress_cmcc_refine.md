@@ -641,3 +641,342 @@ export TORCH_CUDA_ARCH_LIST="9.0"
 **总耗时**: 2小时45分钟  
 **有效工作时间**: 2小时（75%效率）  
 **下次会话起点**: 五.5.1 最小复现测试
+
+---
+
+## 十一、Conda 环境打包与离线部署（2026-08-17 14:00-16:30）
+
+**会话目标**: 打包本地 conda 环境上传 ModelScope，CMCC 端离线部署
+
+---
+
+### 11.1 环境打包阶段
+
+#### 问题1: conda-pack 不支持可编辑包
+
+**错误**:
+```
+CondaPackError: Cannot pack an environment with editable packages installed
+- nvidia_vipe
+- sana_wm_pipeline
+```
+
+**解决方案**: 放弃 conda-pack，直接 tar 打包整个环境目录
+
+**命令**:
+```bash
+cd /mnt/afs/davidwang/miniconda3/envs
+tar -czf sana_qc_clean.tar.gz --exclude='*.pyc' --exclude='__pycache__' sana_qc
+tar -czf sana_wm_clean.tar.gz --exclude='*.pyc' --exclude='__pycache__' sana_wm
+```
+
+**结果**:
+- sana_qc_clean.tar.gz: 3.7GB (57990 文件)
+- sana_wm_clean.tar.gz: 3.7GB (57990 文件)
+- MD5 校验文件生成
+
+---
+
+#### 问题2: 压缩包内目录名不匹配
+
+**现象**: 
+- 压缩包文件名: `sana_qc_clean.tar.gz`
+- 解压后目录名: `sana_qc` (不是 `sana_qc_clean`)
+
+**根因**: tar 打包保留原始目录名
+
+**影响**: 部署文档中的重命名步骤
+
+---
+
+### 11.2 CMCC 离线部署阶段
+
+#### 问题3: 目录重命名导致 Segmentation Fault
+
+**操作**:
+```bash
+tar -xzf sana_wm_clean.tar.gz  # 解压出 sana_wm/
+mv sana_wm sana_wm_clean       # 重命名
+conda activate sana_wm_clean
+python                          # Segmentation fault
+```
+
+**根因**: 
+- ELF 二进制文件（Python 解释器、C 扩展）包含硬编码 RPATH
+- RPATH 指向 `/mnt/afs/.../sana_wm`
+- 重命名后，动态链接器找不到 `lib/` 导致 segfault
+
+**解决**: **不重命名**，直接用原始名称 `sana_qc` 和 `sana_wm`
+
+**正确操作**:
+```bash
+tar -xzf sana_wm_clean.tar.gz  # 解压出 sana_wm/
+# 不重命名！
+conda config --append envs_dirs /root/work/david_work/conda_envs
+conda activate sana_wm          # 使用原始名称
+```
+
+**结果**: ✅ Python 可用
+
+---
+
+#### 问题4: pip 命令损坏
+
+**现象**:
+```bash
+pip --version
+# bash: /root/work/david_work/conda_envs/sana_wm/bin/pip: cannot execute: required file not found
+```
+
+**根因**: pip 脚本的 shebang 指向本地路径
+```python
+#!/mnt/afs/davidwang/miniconda3/envs/sana_wm/bin/python
+```
+
+**解决**: 
+```bash
+# 方案1: 修复 shebang
+sed -i '1s|^#!.*|#!/root/work/david_work/conda_envs/sana_wm/bin/python|' \
+  /root/work/david_work/conda_envs/sana_wm/bin/pip*
+
+# 方案2: 用 python -m pip 代替
+python -m pip --version  # ✅ 可用
+```
+
+---
+
+#### 问题5: 可编辑包路径失效
+
+**检查**:
+```bash
+cat lib/python3.10/site-packages/__editable__.nvidia_vipe-1.1.0.pth
+# import __editable___nvidia_vipe_1_1_0_finder; ...
+
+cat lib/python3.10/site-packages/__editable__.sana_wm_pipeline*.pth
+# /mnt/afs/davidwang/workspace/sana_wm_pipeline/src  ← 路径不存在
+```
+
+**根因**: 可编辑包用 PEP 660 方式（`__editable__*.pth`），包含硬编码源码路径
+
+**当前状态**:
+- nvidia_vipe: 使用 finder 机制（需进一步检查）
+- sana_wm_pipeline: 硬编码本地路径 `/mnt/afs/.../src`
+
+**待执行修复**:
+```bash
+# 检查 vipe finder 内容
+cat lib/python3.10/site-packages/__editable___nvidia_vipe_1_1_0_finder.py | grep -A5 "MAPPING"
+
+# 修复 sana_wm_pipeline 路径
+echo "/root/work/david_work/sana_wm_optimized/sana_wm_pipeline/src" > \
+  lib/python3.10/site-packages/__editable__.sana_wm_pipeline*.pth
+```
+
+---
+
+### 11.3 部署文档更新需求
+
+**CMCC_MANUAL_DEPLOYMENT.md 需要修正**:
+
+1. **步骤3: 解压环境**
+   - ❌ 删除重命名步骤（会导致 segfault）
+   - ✅ 直接用 `sana_qc` 和 `sana_wm` 原始名称
+
+2. **步骤4: 修复环境路径**
+   - ❌ 批量 sed 替换路径（对 ELF 文件无效）
+   - ✅ 删除此步骤（不需要路径修复）
+
+3. **步骤5: 修复可编辑包**
+   - ❌ 用 `pip install -e --no-deps` 重装
+   - ✅ 直接修改 `__editable__*.pth` 文件内容
+
+4. **激活环境**
+   - ❌ `source bin/activate`（文件不存在）
+   - ✅ `conda activate sana_wm`（需先注册 envs_dirs）
+
+5. **pip 使用**
+   - ❌ 直接用 `pip` 命令
+   - ✅ 用 `python -m pip` 或修复 shebang
+
+---
+
+### 11.4 关键洞察
+
+#### 洞察4: Conda 环境的三种路径
+
+| 路径类型 | 位置 | 是否可替换 | 影响 |
+|---------|------|-----------|------|
+| **ELF RPATH** | 二进制文件内部 | ❌ 不可（硬编码） | 重命名目录导致 segfault |
+| **脚本 shebang** | 文本文件第一行 | ✅ 可（sed 替换） | pip 命令失效 |
+| **可编辑包路径** | `*.pth` 文件 | ✅ 可（直接编辑） | 模块导入失败 |
+
+**教训**: 
+- ELF RPATH 不可修改 → 目录名不能改
+- shebang 和 .pth 可修改 → 修复这两处即可
+
+---
+
+#### 洞察5: 为什么需要"重装"可编辑包
+
+**误解**: 以为环境中没有 vipe
+
+**真相**: 
+- vipe **已安装**，但是可编辑模式
+- 可编辑安装 = 环境中只有指针文件（`*.pth`），源码在项目目录
+- 指针文件内容 = `/mnt/afs/.../third_party/vipe` ← 此路径在 CMCC 不存在
+
+**两种修复方式**:
+1. 修改 `.pth` 文件指向 CMCC 项目路径（快）
+2. 重新 `pip install -e <CMCC路径> --no-deps`（慢但彻底）
+
+---
+
+### 11.5 路径残留是否需要修复？
+
+**grep 发现大量残留**:
+```
+include/gmp.h: -isystem /mnt/afs/.../sana_qc/include
+lib/tkConfig.sh: TK_PREFIX='/mnt/afs/.../sana_qc'
+lib/icu/pkgdata.inc: -L/mnt/afs/.../sana_qc/lib
+```
+
+**分析**:
+- 这些是**编译时元数据**（构建时的编译器参数）
+- 运行时不读取这些文件
+- **不影响 Python 正常运行**
+
+**验证**: CMCC 机器 Python 已可用，说明路径残留无害
+
+---
+
+### 11.6 正确的部署流程
+
+**简化版（CMCC 端执行）**:
+
+```bash
+# 1. 下载并解压（不重命名）
+cd /root/work/david_work/conda_envs
+tar -xzf sana_wm_clean.tar.gz  # 得到 sana_wm/
+
+# 2. 注册到 conda
+conda config --append envs_dirs /root/work/david_work/conda_envs
+
+# 3. 激活环境
+conda activate sana_wm
+
+# 4. 修复 pip（可选）
+python -m pip  # 或修复 shebang
+
+# 5. 修复可编辑包路径
+echo "/root/work/david_work/sana_wm_optimized/sana_wm_pipeline/src" > \
+  lib/python3.10/site-packages/__editable__.sana_wm_pipeline*.pth
+
+# 检查 vipe finder 并修复（待验证）
+cat lib/python3.10/site-packages/__editable___nvidia_vipe_1_1_0_finder.py
+```
+
+---
+
+### 11.7 生成的文件清单
+
+**本地生成**:
+- `sana_qc_clean.tar.gz` (3.7GB)
+- `sana_wm_clean.tar.gz` (3.7GB)
+- `*.md5` 校验文件
+- `CMCC_DEPLOYMENT_GUIDE.sh` - 自动部署脚本（需更新）
+- `CMCC_MANUAL_DEPLOYMENT.md` - 手动部署文档（需大量更新）
+- `DEPLOYMENT_SUMMARY.md` - 部署总结
+- `fix_activate.sh` - 激活修复脚本（已过时，不需要）
+- `upload_to_modelscope.sh` - 上传脚本（已修正参数）
+
+**待更新文件**:
+- ❌ `CMCC_MANUAL_DEPLOYMENT.md` - 步骤 3/4/5/激活方式全部错误
+- ❌ `CMCC_DEPLOYMENT_GUIDE.sh` - 包含错误的重命名和路径修复逻辑
+- ✅ `upload_to_modelscope.sh` - ModelScope CLI 参数已修正
+
+---
+
+### 11.8 当前状态与下一步
+
+**CMCC 端当前状态**:
+- ✅ 环境已解压到 `/root/work/david_work/conda_envs/sana_wm`
+- ✅ `conda activate sana_wm` 可激活
+- ✅ `python --version` 正常
+- ❌ `pip` 命令损坏（可用 `python -m pip` 绕过）
+- ❌ `import vipe` 失败（可编辑包路径无效）
+- ❌ `import sana_wm_pipeline` 失败（路径指向本地）
+
+**待执行（CMCC 端）**:
+```bash
+# 1. 检查 vipe finder 机制
+cat /root/work/david_work/conda_envs/sana_wm/lib/python3.10/site-packages/__editable___nvidia_vipe_1_1_0_finder.py | grep -A10 "MAPPING"
+
+# 2. 修复 sana_wm_pipeline 路径
+cd /root/work/david_work/conda_envs/sana_wm
+echo "/root/work/david_work/sana_wm_optimized/sana_wm_pipeline/src" > \
+  lib/python3.10/site-packages/__editable__.sana_wm_pipeline*.pth
+
+# 3. 验证
+python -c "import sana_wm_pipeline; print('OK')"
+python -c "import vipe; print('OK')"
+```
+
+**待完成（本地）**:
+- [ ] 更新 `CMCC_MANUAL_DEPLOYMENT.md`（删除错误步骤，添加正确流程）
+- [ ] 更新 `CMCC_DEPLOYMENT_GUIDE.sh`（修复重命名逻辑）
+- [ ] 执行 `upload_to_modelscope.sh` 上传压缩包
+- [ ] 同时上传修正后的部署脚本
+
+---
+
+### 11.9 Ponytail 经验补充
+
+**新增教训**:
+
+1. **验证打包结果的完整性**
+   - ❌ 假设 tar 压缩包内目录名等于文件名
+   - ✅ 用 `tar -tzf` 检查实际目录结构
+
+2. **理解二进制文件的硬编码**
+   - ❌ 以为 sed 可以修复所有路径
+   - ✅ ELF RPATH 不可修改，目录名必须保持
+
+3. **区分"不存在"vs"指针失效"**
+   - ❌ `ModuleNotFoundError` 就以为包没装
+   - ✅ 检查 `*.pth` 文件，可能只是路径失效
+
+4. **最简单的验证方式**
+   - ✅ 直接在目标环境解压测试
+   - ❌ 编写复杂的路径修复脚本再测试
+
+---
+
+### 11.10 会话总结（14:00-16:30）
+
+**核心成果**:
+- ✅ 成功打包两个环境（3.7GB × 2）
+- ✅ 发现并理解 ELF RPATH 限制（目录不能重命名）
+- ✅ 找到可编辑包路径失效的根因（`__editable__*.pth`）
+- ❌ 部署文档严重过时（大量错误步骤）
+
+**时间分配**:
+- 打包环境：30 分钟（包含失败的 conda-pack 尝试）
+- CMCC 部署测试：60 分钟（发现 segfault 问题）
+- 可编辑包排查：40 分钟（理解 PEP 660 机制）
+- 文档编写：20 分钟
+
+**关键发现**: 
+> Conda 环境打包的核心矛盾：ELF RPATH 硬编码 vs 目录可移植性。  
+> 解决方案：不改目录名，只修复文本文件（shebang + .pth）
+
+**遗留问题**:
+1. vipe 的 finder 机制未完全理解（待查看 `__editable___nvidia_vipe_1_1_0_finder.py`）
+2. 部署文档需要大量重写
+3. ModelScope 上传尚未执行
+
+---
+
+**文档版本**: v3.0  
+**最后更新**: 2026-08-17 16:30  
+**总耗时**: 5小时15分钟（11:00-13:45 + 14:00-16:30）  
+**下次会话起点**: 十一.11.8 "待执行（CMCC 端）"

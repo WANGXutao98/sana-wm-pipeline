@@ -113,14 +113,60 @@ def run_default(
     return _load_vipe_artifacts(clip_path, work_dir)
 
 
+def even_indices(count: int, n: int) -> np.ndarray:
+    """生成n个均匀分布的整数索引，范围[0, count)。
+
+    这是帧采样的单一真理源 (SINGLE source of truth)。
+    所有需要采样的地方（Pi3/MoGe输入、GT姿态对齐等）必须使用此函数，
+    避免不同模块使用不同采样逻辑导致的帧错位。
+
+    参考: sana-wm-data-clean/pose/adapters.py:25-33
+
+    历史问题:
+        旧版本在某些地方用 .astype(int) 截断，另一些地方用 .round()，
+        导致同一采样索引i对应不同的视频帧，严重污染GT对齐的度量尺度估计。
+
+    Args:
+        count: 序列总长度（例如视频总帧数）
+        n: 需要采样的数量
+
+    Returns:
+        (n,) 整数索引数组，四舍五入到最近的帧
+
+    Examples:
+        >>> even_indices(100, 64)  # 从100帧采样64帧
+        array([ 0,  2,  3,  5, ..., 96, 97, 99])
+
+        >>> even_indices(0, 64)    # 空视频保护
+        array([0])
+
+        >>> even_indices(100, 0)   # 请求0帧，返回中间帧
+        array([50])
+    """
+    return np.linspace(
+        0,
+        max(count - 1, 0),           # 空视频时: max(-1, 0) = 0
+        max(min(n, count), 1)        # 至少返回1帧，最多count帧
+    ).round().astype(int)
+
+
 def _read_frames_uniform(video_path: str, max_frames: int) -> np.ndarray:
-    """均匀采样视频帧 -> (S, H, W, 3) uint8 RGB"""
+    """均匀采样视频帧 -> (S, H, W, 3) uint8 RGB
+
+    使用 even_indices() 作为采样规则，确保与其他模块（GT对齐等）一致。
+
+    Args:
+        video_path: 视频文件路径
+        max_frames: 最大采样帧数
+
+    Returns:
+        (S, H, W, 3) uint8 RGB数组，S <= max_frames
+    """
     import decord
     vr = decord.VideoReader(video_path)
     total = len(vr)
-    S = min(max_frames, total)
-    indices = np.linspace(0, total - 1, S).round().astype(int)
-    frames = vr.get_batch(indices).asnumpy()  # (S, H, W, 3) RGB uint8
+    indices = even_indices(total, max_frames)  # 使用单一真理源
+    frames = vr.get_batch(list(indices)).asnumpy()  # (S, H, W, 3) RGB uint8
     return frames
 
 

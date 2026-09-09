@@ -723,11 +723,11 @@ Warning, cannot find cuda-compiled version of RoPE2D, using a slow pytorch versi
     ↓
 查看错误类型
     ↓
-    ├─→ ModuleNotFoundError → 查看问题 1、2
+    ├─→ ModuleNotFoundError → 查看问题 1、2、5
     ├─→ FileNotFoundError (vipe) → 查看问题 3
     ├─→ Segmentation Fault → 查看问题 4
-    ├─→ ModuleNotFoundError (psutil) → 查看问题 5
-    └─→ CUDA version mismatch → 查看问题 6
+    ├─→ CUDA version mismatch → 查看问题 6
+    └─→ ImportError (undefined symbol) → 查看问题 7
 ```
 
 ---
@@ -918,6 +918,147 @@ RuntimeError: ('The detected CUDA version (%s) mismatches the version that was u
 
 ---
 
+### 问题 7：ABI 不兼容 - ImportError: undefined symbol
+
+**症状**：
+```python
+ImportError: /path/to/vipe_ext.cpython-310-x86_64-linux-gnu.so: undefined symbol: _ZN3c104cuda9SetDeviceEi
+```
+或其他涉及 `torch`、`c10`、`_Z` 开头的 C++ 符号未定义错误。
+
+**原因**：PyTorch C++ ABI 不兼容
+- PyTorch 有两个 ABI 版本：旧 ABI (`_GLIBCXX_USE_CXX11_ABI=0`) 和新 ABI (`_GLIBCXX_USE_CXX11_ABI=1`)
+- vipe 的 C++ 扩展（`vipe_ext.so`）必须与 PyTorch 使用相同的 ABI 编译
+- ABI 不匹配会导致运行时符号链接失败
+
+**诊断**：
+```bash
+# 检查 PyTorch 的 ABI 版本
+python -c "import torch; print(f'PyTorch CXX11 ABI: {torch._C._GLIBCXX_USE_CXX11_ABI}')"
+# True = 新 ABI, False = 旧 ABI
+
+# 检查 vipe_ext.so 依赖的符号
+cd /root/work/david_work/sana_wm_optimized/sana_wm_pipeline/third_party/vipe
+nm -D vipe_ext.cpython-310-x86_64-linux-gnu.so | grep torch | head -10
+```
+
+**根本原因**：
+- 本机打包时使用的 PyTorch ABI 版本与 CMCC 不同
+- 或者 vipe 扩展在不同 ABI 环境下编译
+
+**解决方案 A：重新打包使用 CXX11 ABI 的 PyTorch（推荐）**
+
+如果当前 PyTorch 使用旧 ABI，但需要新 ABI：
+
+```bash
+# 在本机执行（重新准备环境）
+source /mnt/afs/davidwang/miniconda3/etc/profile.d/conda.sh
+conda activate sana_wm
+
+# 1. 检查当前 ABI
+python -c "import torch; print(f'当前 ABI: {torch._C._GLIBCXX_USE_CXX11_ABI}')"
+
+# 2. 如果是 False（旧 ABI），需要重新安装 PyTorch
+pip uninstall torch torchvision torchaudio -y
+
+# 3. 安装新 ABI 版本（需要外网或提前下载 wheel）
+pip install torch==2.12.0+cu130.cxx11.abi \
+  torchvision==0.17.0+cu130.cxx11.abi \
+  torchaudio==2.12.0+cu130.cxx11.abi \
+  --extra-index-url https://download.pytorch.org/whl/cu130
+
+# 或者离线安装（如果已下载 wheel 文件）
+pip install torch-2.12.0+cu130.cxx11.abi-*.whl \
+  torchvision-0.17.0+cu130.cxx11.abi-*.whl \
+  torchaudio-2.12.0+cu130.cxx11.abi-*.whl
+
+# 4. 验证新 ABI
+python -c "import torch; print(f'新 ABI: {torch._C._GLIBCXX_USE_CXX11_ABI}')"
+# 应该输出：新 ABI: True
+
+# 5. 重新编译 vipe 扩展
+cd /mnt/afs/davidwang/workspace/sana_wm_pipeline/third_party/vipe
+rm -f vipe_ext.*.so
+pip install -e . --no-build-isolation
+
+# 6. 测试 vipe 扩展加载
+python -c "import vipe; print('✓ vipe 扩展加载成功')"
+
+# 7. 重新执行完整打包流程（本文档"本机打包流程"章节）
+```
+
+**解决方案 B：CMCC 上重新编译 vipe 扩展（需要 CUDA 工具链）**
+
+如果不想重新打包，可以在 CMCC 上直接重新编译扩展：
+
+```bash
+# CMCC 操作
+source /root/work/david_work/envs/sana_wm_cuda13/bin/activate
+
+# 前提：需要先安装 CUDA 工具链（参考本文档步骤 3 选项 B）
+# 如果没有工具链，这个方案不可行
+
+cd /root/work/david_work/sana_wm_optimized/sana_wm_pipeline/third_party/vipe
+
+# 1. 清理旧的编译产物
+rm -f vipe_ext.*.so
+find . -type d -name "build" -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
+
+# 2. 重新编译
+export TORCH_CUDA_ARCH_LIST=9.0
+python setup.py build_ext --inplace
+
+# 3. 验证
+python -c "
+import sys
+sys.path.insert(0, '.')
+from vipe.slam.vipe_ext import *
+print('✓ vipe 扩展加载成功')
+"
+```
+
+**预防措施（打包前检查）**：
+
+```bash
+# 在本机打包前执行此检查
+echo "=== ABI 兼容性检查 ==="
+
+# 1. 检查 PyTorch ABI
+python -c "import torch; print(f'PyTorch CXX11 ABI: {torch._C._GLIBCXX_USE_CXX11_ABI}')"
+
+# 2. 检查 vipe 扩展文件
+VIPE_EXT=$(find /mnt/afs/davidwang/workspace/sana_wm_pipeline/third_party/vipe -name "vipe_ext.*.so")
+if [ -n "$VIPE_EXT" ]; then
+    echo "✓ vipe 扩展存在: $VIPE_EXT"
+    ls -lh "$VIPE_EXT"
+else
+    echo "✗ vipe 扩展不存在，需要编译"
+fi
+
+# 3. 测试扩展加载
+python -c "
+import sys
+sys.path.insert(0, '/mnt/afs/davidwang/workspace/sana_wm_pipeline/third_party/vipe')
+try:
+    import vipe
+    print('✓ vipe 模块加载正常')
+except ImportError as e:
+    print(f'✗ vipe 模块加载失败: {e}')
+    exit(1)
+"
+
+echo "=== 检查完成 ==="
+```
+
+**关键点**：
+- ABI 问题**只影响 C++ 扩展**，纯 Python 代码不受影响
+- 如果错误信息包含 `undefined symbol` 且符号名包含 `_Z`、`torch`、`c10`，99% 是 ABI 不兼容
+- **最简单的方案**：确保本机和 CMCC 使用相同 ABI 版本的 PyTorch
+- 如果 vipe 不需要 C++ 加速，可以设置 `VIPE_EXT_JIT=0` 使用纯 Python 实现（性能较低）
+
+---
+
 ## 关键经验总结
 
 ### 1. 必须执行的步骤（不能跳过）
@@ -928,6 +1069,7 @@ RuntimeError: ('The detected CUDA version (%s) mismatches the version that was u
 | 创建 vipe CLI | vipe 命令被移除了 | FileNotFoundError: 'vipe' |
 | 设置 PYTHONPATH | 模块通过路径引用 | ModuleNotFoundError |
 | 安装 psutil | rerun-sdk 依赖 | ModuleNotFoundError: 'psutil' |
+| ABI 一致性检查 | PyTorch 与 C++ 扩展必须同 ABI | ImportError: undefined symbol |
 
 ### 2. PYTHONPATH 的正确写法
 

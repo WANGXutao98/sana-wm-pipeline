@@ -26,6 +26,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--shard-indices",     required=True,
                    help="逗号分隔 shard 下标，如 '0,8,16'")
     p.add_argument("--samples-per-shard", type=int, default=200)
+    # 新增：模式选择
+    p.add_argument("--mode",
+                   choices=["default", "gt_depth", "gt_pose"],
+                   default="default",
+                   help="标注模式: default(互联网视频), gt_depth(OmniWorld), gt_pose(Sekai/DL3DV)")
+    p.add_argument("--gt-data-dir",      type=Path,
+                   help="GT数据目录，用于 gt_depth/gt_pose 模式")
     return p.parse_args()
 
 
@@ -54,6 +61,49 @@ def _load_captions(index_path: Path) -> dict[str, str]:
     return caps
 
 
+def run_pose_annotation(
+    mode: str,
+    norm_video: Path,
+    work_dir: Path,
+    gt_data_dir: Path | None,
+    sample_key: str,
+):
+    """根据模式调用对应的pose标注函数。
+
+    Args:
+        mode: 标注模式 (default/gt_depth/gt_pose)
+        norm_video: 归一化后的视频路径
+        work_dir: 工作目录
+        gt_data_dir: GT数据根目录
+        sample_key: 样本key，用于查找对应的GT数据
+
+    Returns:
+        PoseArtifact 对象
+    """
+    if mode == "default":
+        from sana_wm_pipeline.stage02_pose.mode_default import run_default
+        return run_default(norm_video, work_dir)
+
+    elif mode == "gt_depth":
+        from sana_wm_pipeline.stage02_pose.mode_gtdepth import run_gtdepth
+        # GT depth路径: {gt_data_dir}/{sample_key}/depth.npy
+        gt_depth_path = gt_data_dir / sample_key / "depth.npy"
+        if not gt_depth_path.exists():
+            raise FileNotFoundError(f"GT depth not found: {gt_depth_path}")
+        return run_gtdepth(norm_video, gt_depth_path, work_dir)
+
+    elif mode == "gt_pose":
+        from sana_wm_pipeline.stage02_pose.mode_gtpose import run_gtpose
+        # GT poses路径: {gt_data_dir}/{sample_key}/poses.npy
+        gt_poses_path = gt_data_dir / sample_key / "poses.npy"
+        if not gt_poses_path.exists():
+            raise FileNotFoundError(f"GT poses not found: {gt_poses_path}")
+        return run_gtpose(norm_video, gt_poses_path, work_dir)
+
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+
 def process_input_shard(
     shard_path: Path,
     shard_idx: int,
@@ -63,6 +113,8 @@ def process_input_shard(
     worker_out: Path,
     progress_dir: Path,
     samples_per_shard: int,
+    mode: str,                    # 新增
+    gt_data_dir: Path | None,     # 新增
     shard_writer_cls=None,
 ) -> tuple[int, int]:
     import shard_io
@@ -77,7 +129,6 @@ def process_input_shard(
 
     from sana_wm_pipeline.stage01_ingest.jdvbbfb_wds import iter_tar_samples
     from sana_wm_pipeline.stage01_ingest.normalize import normalize_video
-    from sana_wm_pipeline.stage02_pose.mode_default import run_default
     from sana_wm_pipeline.stage06_pack.schema import Sample
 
     STUB = "A real-world scene captured by a moving camera."
@@ -100,7 +151,7 @@ def process_input_shard(
                     info = normalize_video(raw_video, norm_video)
                     raw_video.unlink()
                     vipe_work = sample_tmp / "vipe_work"
-                    art = run_default(norm_video, vipe_work)
+                    art = run_pose_annotation(mode, norm_video, vipe_work, gt_data_dir, key)
                     caption = captions.get(key, "").strip() or STUB
                     sample = Sample(
                         sample_id=key,
@@ -112,7 +163,7 @@ def process_input_shard(
                         meta={
                             "scene_id": key,
                             "T": int(art.poses_c2w.shape[0]),
-                            "mode": "default",
+                            "mode": mode,
                             "dataset": "jdvbbfb-v3-full",
                             "group": group,
                             "source_shard": shard_path.name,
@@ -137,6 +188,15 @@ def process_input_shard(
 
 def main() -> None:
     args = parse_args()
+
+    # 验证模式与GT数据目录的一致性
+    if args.mode in ("gt_depth", "gt_pose") and not args.gt_data_dir:
+        print(f"[ERROR] --mode {args.mode} 需要 --gt-data-dir 参数", file=sys.stderr)
+        sys.exit(1)
+
+    if args.gt_data_dir and not args.gt_data_dir.exists():
+        print(f"[ERROR] GT数据目录不存在: {args.gt_data_dir}", file=sys.stderr)
+        sys.exit(1)
 
     # 每个 worker 独立输出目录，无需文件锁（w000, w001, ...）
     worker_out  = args.out_base / args.group / f"w{args.worker_id:03d}"
@@ -165,6 +225,7 @@ def main() -> None:
         n_ok, n_fail = process_input_shard(
             shard_path, shard_idx, args.group, captions, tmp_dir,
             worker_out, progress_dir, args.samples_per_shard,
+            args.mode, args.gt_data_dir,  # 新增参数
         )
         total_ok += n_ok
         total_fail += n_fail

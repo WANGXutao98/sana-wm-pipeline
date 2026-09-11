@@ -22,118 +22,30 @@ from typing import Sequence
 import numpy as np
 
 from ._common import PoseArtifact
+from .depth_fusion import fuse_depth_sequence
 
 VIPE_CMD: Sequence[str] = ("vipe", "infer")
 VIPE_PIPELINE = "vipe_cached_depth"
 
-
-def _precompute_depth_cache(
-    clip_path: Path,
-    cache_path: Path,
-    pi3x_weights: str,
-    moge2_weights: str,
-    chunk: int = 16,
-    stride: int = 8,
-    device: str = "cuda",
-) -> None:
-    """预计算 Pi3X+MoGe-2 融合深度缓存（论文 App. B.1），写到 cache_path.npz。
-
-    格式与 experiments/vipe_comparison/precompute_pi3x_depths.py 一致：
-      depths: (T, H, W) float32 metric (metres)
-      scale_history: (T,) float32
-    """
-    import cv2
-    import torch
-    import torch.nn.functional as F
-
-    # 1. 读帧
-    cap = cv2.VideoCapture(str(clip_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {clip_path}")
-    frames = []
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    cap.release()
-    frames_np = np.stack(frames, axis=0).astype(np.float32) / 255.0  # (T,H,W,3)
-    T, H, W, _ = frames_np.shape
-    frames_t = torch.from_numpy(frames_np).permute(0, 3, 1, 2).to(device)  # (T,3,H,W)
-
-    # 2. Pi3X 分块推理（复用 experiments 逻辑，inline 实现）
-    from pi3 import Pi3X  # type: ignore
-    pi3x_model = Pi3X.from_pretrained(pi3x_weights).to(device).eval()
-
-    H_r = (H // 14) * 14
-    W_r = (W // 14) * 14
-    src = F.interpolate(frames_t, size=(H_r, W_r), mode="bilinear", align_corners=False) if H_r != H or W_r != W else frames_t
-
-    accum = np.zeros((T, H_r, W_r), dtype=np.float32)
-    count = np.zeros(T, dtype=np.float32)
-    starts = list(range(0, max(T - chunk + 1, 1), stride))
-    if not starts or starts[-1] + chunk < T:
-        starts.append(max(0, T - chunk))
-
-    with torch.no_grad():
-        for s in starts:
-            e = min(s + chunk, T)
-            out = pi3x_model(src[s:e].unsqueeze(0))
-            d = out["local_points"][0, :e - s, :, :, 2].cpu().numpy()
-            accum[s:e] += d
-            count[s:e] += 1
-    d_pi3x = accum / np.maximum(count[:, None, None], 1.0)
-    if H_r != H or W_r != W:
-        d_pi3x = F.interpolate(
-            torch.from_numpy(d_pi3x).unsqueeze(1).to(device),
-            size=(H, W), mode="bilinear", align_corners=False,
-        ).squeeze(1).cpu().numpy()
-    del pi3x_model
-
-    # 3. MoGe-2 逐帧推理
-    import math
-    from moge.model.v2 import MoGeModel  # type: ignore
-    moge2_path = Path(moge2_weights)
-    moge2_ckpt = moge2_path / "model.pt" if moge2_path.is_dir() else moge2_path
-    moge2_model = MoGeModel.from_pretrained(str(moge2_ckpt)).to(device).eval()
-    fov_x = math.degrees(2 * math.atan(W / (2 * 525.0)))  # 合理初始估计
-    d_moge = []
-    with torch.no_grad():
-        for i in range(T):
-            out = moge2_model.infer(frames_t[i:i + 1], fov_x=fov_x)
-            d_moge.append(out["depth"].squeeze(0).cpu().numpy())
-    d_moge = np.stack(d_moge, axis=0)
-    del moge2_model
-
-    # 4. EMA scale fusion（论文 App. B.1）
-    T_ = len(d_pi3x)
-    scale_history = np.zeros(T_, dtype=np.float32)
-    ema = None
-    for t in range(T_):
-        mask = (d_pi3x[t] > 1e-6) & (d_moge[t] > 1e-6)
-        ratio = float(d_moge[t][mask].mean()) / (float(d_pi3x[t][mask].mean()) + 1e-8) if mask.sum() >= 10 else 1.0
-        if ema is None:
-            ema = float(np.median(d_moge[t][mask] / (d_pi3x[t][mask] + 1e-8))) if mask.sum() >= 10 else ratio
-        else:
-            ema = ema * 0.99 + ratio * 0.01
-        scale_history[t] = ema
-    depths_fused = (d_pi3x * scale_history[:, None, None]).astype(np.float32)
-
-    # 5. 保存
-    np.savez_compressed(str(cache_path), depths=depths_fused, scale_history=scale_history)
+# 旧的inline预计算函数已废弃，替换为独立脚本 scripts/precompute_fused_depth_reference.py
+# def _precompute_depth_cache(...): ...
 
 
 def run_default(
     clip_path: Path,
     work_dir: Path,
     vipe_cmd: Sequence[str] = VIPE_CMD,
-    pipeline: str = VIPE_PIPELINE,
+    pipeline: str = "vipe_sanawm",
 ) -> PoseArtifact:
-    """Invoke two-phase VIPE: precompute depth cache, then run cached SLAM.
+    """使用sana-wm-data-clean参考实现（带@lru_cache模型缓存）
 
-    Phase A: compute Pi3X+MoGe-2 fused depth cache (~600 MB, deleted after).
-    Phase B: VIPE SLAM with vipe_cached_depth pipeline (CachedDepthModel injects BA).
+    Phase A: 使用_real.py的pi3_infer + moge_metric_depth（模型只加载一次）
+    Phase B: VIPE SLAM with vipe_sanawm pipeline
     """
+    import sys
+    import cv2
+    from ..sana_wm_data_clean.pose import _real
+
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -144,14 +56,49 @@ def run_default(
             "SANA_WM_PI3X_WEIGHTS and SANA_WM_MOGE2_WEIGHTS must be set"
         )
 
-    cache_path = work_dir / "_depth_cache.npz"
-    _precompute_depth_cache(
-        clip_path, cache_path,
-        pi3x_weights=pi3x_weights,
-        moge2_weights=moge2_weights,
-    )
+    # Phase A: 使用sana-wm-data-clean的_real.py（带@lru_cache）
+    print("[mode_default] Phase A: 深度预计算", flush=True)
+    depth_dir = work_dir / "depth_precomputed"
+    depth_dir.mkdir(parents=True, exist_ok=True)
 
-    os.environ["SANA_WM_CACHED_DEPTH_PATH"] = str(cache_path)
+    # 读取视频帧（均匀采样64帧）
+    max_frames = int(os.environ.get("SANA_WM_MAX_FRAMES", "64"))
+    print(f"  读取视频: {clip_path}", flush=True)
+    frames = _read_frames_uniform(str(clip_path), max_frames)
+    S = frames.shape[0]
+    print(f"  采样帧数: {S}", flush=True)
+
+    # Pi3推理（第一次调用50s，后续调用直接用缓存0s）
+    print(f"  Pi3推理 ({S}帧)...", flush=True)
+    poses_pi3, depth_pi3 = _real.pi3_infer(frames)
+
+    # MoGe推理（第一次调用30s，后续调用直接用缓存0s）
+    print(f"  MoGe-2推理 ({S}帧)...", flush=True)
+    depth_moge = _real.moge_metric_depth(frames, ref_hw=depth_pi3.shape[1:])
+
+    # 深度融合
+    print(f"  深度融合...", flush=True)
+    fused, scales = fuse_depth_sequence(depth_pi3, np.abs(depth_moge), ema_momentum=0.99)
+
+    # 保存预计算结果（供VIPE使用）
+    np.save(depth_dir / "fused.npy", fused.astype(np.float32))
+    np.save(depth_dir / "scales.npy", scales.astype(np.float32))
+
+    # 计算RGB签名（16x16下采样）
+    sig = _compute_rgb_signatures(frames)
+    np.save(depth_dir / "sig.npy", sig)
+
+    # 保存采样索引
+    import decord
+    total_frames = len(decord.VideoReader(str(clip_path)))
+    sample_idx = np.linspace(0, total_frames - 1, S).round().astype(int)
+    np.save(depth_dir / "sample_idx.npy", sample_idx)
+
+    print(f"  ✅ 预计算完成: fused{fused.shape}, scale~{float(np.median(scales)):.3f}", flush=True)
+
+    # Phase B: VIPE SLAM with Pi3xMogeModel
+    print("[mode_default] Phase B: VIPE SLAM", flush=True)
+    os.environ["SANA_WM_FUSED_DEPTH_DIR"] = str(depth_dir)
     try:
         cmd = [
             *vipe_cmd,
@@ -161,10 +108,77 @@ def run_default(
         ]
         subprocess.check_call(cmd)
     finally:
-        os.environ.pop("SANA_WM_CACHED_DEPTH_PATH", None)
-        cache_path.unlink(missing_ok=True)
+        os.environ.pop("SANA_WM_FUSED_DEPTH_DIR", None)
 
     return _load_vipe_artifacts(clip_path, work_dir)
+
+
+def even_indices(count: int, n: int) -> np.ndarray:
+    """生成n个均匀分布的整数索引，范围[0, count)。
+
+    这是帧采样的单一真理源 (SINGLE source of truth)。
+    所有需要采样的地方（Pi3/MoGe输入、GT姿态对齐等）必须使用此函数，
+    避免不同模块使用不同采样逻辑导致的帧错位。
+
+    参考: sana-wm-data-clean/pose/adapters.py:25-33
+
+    历史问题:
+        旧版本在某些地方用 .astype(int) 截断，另一些地方用 .round()，
+        导致同一采样索引i对应不同的视频帧，严重污染GT对齐的度量尺度估计。
+
+    Args:
+        count: 序列总长度（例如视频总帧数）
+        n: 需要采样的数量
+
+    Returns:
+        (n,) 整数索引数组，四舍五入到最近的帧
+
+    Examples:
+        >>> even_indices(100, 64)  # 从100帧采样64帧
+        array([ 0,  2,  3,  5, ..., 96, 97, 99])
+
+        >>> even_indices(0, 64)    # 空视频保护
+        array([0])
+
+        >>> even_indices(100, 0)   # 请求0帧，返回中间帧
+        array([50])
+    """
+    return np.linspace(
+        0,
+        max(count - 1, 0),           # 空视频时: max(-1, 0) = 0
+        max(min(n, count), 1)        # 至少返回1帧，最多count帧
+    ).round().astype(int)
+
+
+def _read_frames_uniform(video_path: str, max_frames: int) -> np.ndarray:
+    """均匀采样视频帧 -> (S, H, W, 3) uint8 RGB
+
+    使用 even_indices() 作为采样规则，确保与其他模块（GT对齐等）一致。
+
+    Args:
+        video_path: 视频文件路径
+        max_frames: 最大采样帧数
+
+    Returns:
+        (S, H, W, 3) uint8 RGB数组，S <= max_frames
+    """
+    import decord
+    vr = decord.VideoReader(video_path)
+    total = len(vr)
+    indices = even_indices(total, max_frames)  # 使用单一真理源
+    frames = vr.get_batch(list(indices)).asnumpy()  # (S, H, W, 3) RGB uint8
+    return frames
+
+
+def _compute_rgb_signatures(frames: np.ndarray) -> np.ndarray:
+    """计算RGB 16x16签名 -> (S, 768)"""
+    import cv2
+    S = frames.shape[0]
+    sig = np.zeros((S, 768), dtype=np.float32)
+    for i, f in enumerate(frames):
+        small = cv2.resize(f, (16, 16), interpolation=cv2.INTER_AREA)
+        sig[i] = small.reshape(-1).astype(np.float32) / 255.0
+    return sig
 
 
 def _load_vipe_artifacts(clip_path: Path, vipe_out: Path) -> PoseArtifact:
@@ -194,17 +208,66 @@ def _load_vipe_artifacts(clip_path: Path, vipe_out: Path) -> PoseArtifact:
     intrinsics_raw = intr_data["data"].astype(np.float32)  # (T, 4) [fx,fy,cx,cy]
     intr_inds = intr_data["inds"]
 
-    # VIPE may only write keyframe poses; interpolate to full T frames.
-    T_full = int(pose_inds.max()) + 1
-    poses_c2w = _interp_poses(poses_c2w, pose_inds, T_full)
-    intrinsics_full = _interp_intrinsics(intrinsics_raw, intr_inds, T_full)
+    # 直接使用VIPE输出（与sana-wm-data-clean/vipe_cli.py:_load_vipe_pose对齐）
+    # 参考: vipe_cli.py:61-70 _load_vipe_pose()
+    # 逻辑: 只按inds排序，不做稀疏化/插值
+    # 理由: 参考实现没有稀疏化逻辑，稀疏化+插值会丢失VIPE BA优化的信息
+    order = np.argsort(pose_inds)
+    poses_c2w = poses_c2w[order]
+    pose_inds_sorted = pose_inds[order]
+
+    order_intr = np.argsort(intr_inds)
+    intrinsics_raw = intrinsics_raw[order_intr]
+    intr_inds_sorted = intr_inds[order_intr]
+
+    # VIPE输出的帧数就是最终帧数（不插值到T_full）
+    T_full = len(poses_c2w)
+
+    print(f"[mode_default] Loaded {T_full} frames from VIPE (aligned with reference)")
+    print(f"[mode_default]   Pose indices: {pose_inds_sorted[:min(5, T_full)].tolist()} ... {pose_inds_sorted[-min(5, T_full):].tolist()}")
+
+    # 参考实现的intrinsics处理逻辑（vipe_cli.py:73-100 _load_perframe_intrinsics）
+    intrinsics_full = _interp_intrinsics_aligned(intrinsics_raw, T_full)
 
     # Reshape intrinsics to (T, 1, 4) as required by PoseArtifact.
     intrinsics_nvd = intrinsics_full[:, None, :]  # (T, 1, 4)
 
-    # scale_per_frame: metric scale ratio (Pi3X-EMA gives this; here we use 1s
-    # since VIPE's unidepth backend already produces metric depth directly).
-    scale_per_frame = np.ones(T_full, dtype=np.float32)
+    # Load scale_per_frame from Phase A (与官方sana-wm-data-clean一致)
+    # 官方: stage.py:104 → scales = scales_arr.tolist()
+    depth_dir = vipe_out / "depth_precomputed"
+    scale_path = depth_dir / "scales.npy"
+
+    if scale_path.exists():
+        scales_full = np.load(scale_path).astype(np.float32)  # (S,) Phase A采样的帧数
+
+        # 如果Phase A采样了关键帧（S < T_full），需要插值到全部帧
+        sample_idx_path = depth_dir / "sample_idx.npy"
+        if sample_idx_path.exists() and len(scales_full) < T_full:
+            sample_idx = np.load(sample_idx_path).astype(int)  # (S,) 采样索引
+            # 线性插值到T_full帧
+            scale_per_frame = np.interp(
+                np.arange(T_full),
+                sample_idx,
+                scales_full
+            ).astype(np.float32)
+            print(f"[mode_default] ✅ Interpolated {len(scales_full)} scales to {T_full} frames")
+        else:
+            # 无需插值，直接使用（或截断）
+            scale_per_frame = scales_full[:T_full] if len(scales_full) >= T_full else scales_full
+            if len(scale_per_frame) < T_full:
+                # 不足则补1.0
+                padding = np.ones(T_full - len(scale_per_frame), dtype=np.float32)
+                scale_per_frame = np.concatenate([scale_per_frame, padding])
+            print(f"[mode_default] ✅ Loaded {len(scales_full)} scales directly")
+
+        print(f"[mode_default]    Scale range: {scale_per_frame.min():.3f} - {scale_per_frame.max():.3f}")
+        print(f"[mode_default]    Scale mean±std: {scale_per_frame.mean():.3f} ± {scale_per_frame.std():.3f}")
+        scale_cov = scale_per_frame.std() / (scale_per_frame.mean() + 1e-8)
+        print(f"[mode_default]    Scale CoV: {scale_cov:.3f} (threshold: <2.0)")
+    else:
+        # Fallback: Phase A失败或缺失时使用默认值
+        scale_per_frame = np.ones(T_full, dtype=np.float32)
+        print(f"[mode_default] ⚠️  {scale_path} not found, using default scale=1.0")
 
     # Optional downsampled depth for visualization.
     depth_ds = _try_load_depth_downsampled(vipe_out, stem, T_full)
@@ -218,25 +281,36 @@ def _load_vipe_artifacts(clip_path: Path, vipe_out: Path) -> PoseArtifact:
     return artifact
 
 
-def _interp_poses(poses: np.ndarray, inds: np.ndarray, T: int) -> np.ndarray:
-    """Nearest-neighbour fill from keyframe poses to dense T frames."""
-    out = np.zeros((T, 4, 4), dtype=np.float32)
-    for i in range(4):
-        for j in range(4):
-            out[:, i, j] = np.interp(np.arange(T), inds, poses[:, i, j])
-    # Ensure first frame is identity (paper App. D.3).
-    if not np.allclose(out[0], np.eye(4), atol=1e-3):
-        T0_inv = np.linalg.inv(out[0])
-        out = (T0_inv[None] @ out)
-    return out.astype(np.float32)
+def _interp_intrinsics_aligned(intr: np.ndarray, n_target: int) -> np.ndarray:
+    """Align intrinsics to target frame count (与vipe_cli.py:_load_perframe_intrinsics对齐).
 
+    参考: sana-wm-data-clean/sana_wm_data/pose/vipe_cli.py:73-100
 
-def _interp_intrinsics(intr: np.ndarray, inds: np.ndarray, T: int) -> np.ndarray:
-    """Linear interpolation of [fx,fy,cx,cy] to T frames."""
-    out = np.zeros((T, 4), dtype=np.float32)
-    for k in range(4):
-        out[:, k] = np.interp(np.arange(T), inds, intr[:, k])
-    return out.astype(np.float32)
+    Args:
+        intr: (K, 4) [fx,fy,cx,cy]
+        n_target: 目标帧数N
+
+    Returns:
+        (N, 4) intrinsics
+
+    Logic:
+        K == N: 直接使用
+        K == 1: broadcast到N帧
+        1 < K < N: 线性插值到N帧
+    """
+    if intr.ndim == 1:
+        intr = intr[None, :]
+    K = intr.shape[0]
+
+    if K == n_target:
+        return intr
+    if K == 1:
+        return np.tile(intr[0], (n_target, 1))
+
+    # 1 < K < N: 线性插值
+    src = np.linspace(0.0, 1.0, K)
+    dst = np.linspace(0.0, 1.0, n_target)
+    return np.stack([np.interp(dst, src, intr[:, j]) for j in range(4)], axis=1).astype(np.float32)
 
 
 def _try_load_depth_downsampled(

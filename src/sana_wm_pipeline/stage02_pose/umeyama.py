@@ -11,45 +11,85 @@ from __future__ import annotations
 import numpy as np
 
 DEFAULT_INLIER_PERCENTILE = 80.0   # paper App. B.1
+_EPS = 1e-12
 
 
-def umeyama_sim3(src: np.ndarray, dst: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
-    """Single-pass Umeyama Sim(3) alignment (no inlier filtering).
+def umeyama_sim3(
+    src: np.ndarray, dst: np.ndarray, with_scale: bool = True
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """Least-squares Sim(3) mapping ``src -> dst`` (Umeyama 1991).
 
-    Solves for s, R, t minimizing sum_i || s R src_i + t - dst_i ||^2.
+    Finds ``s, R, t`` minimising ``sum_k || s R src_k + t - dst_k ||^2``.
+    Returns ``(s, R(3x3), t(3,))``.
+
+    This implementation matches the official SANA-WM code exactly.
 
     Args:
-        src: (N, 3) source points
-        dst: (N, 3) target points
+        src: (N, D) source points
+        dst: (N, D) target points
+        with_scale: if True, compute scale; if False, return s=1.0
 
     Returns:
-        (s, R, t) where s is scalar, R is (3,3), t is (3,).
+        (s, R, t) where s is scalar, R is (D, D), t is (D,).
     """
     src = np.asarray(src, dtype=np.float64)
     dst = np.asarray(dst, dtype=np.float64)
-    if src.shape != dst.shape or src.ndim != 2 or src.shape[1] != 3:
-        raise ValueError(f"src/dst must be (N, 3); got {src.shape}, {dst.shape}")
-    if len(src) < 3:
-        raise ValueError(f"need at least 3 correspondences; got {len(src)}")
+    n, dim = src.shape
 
-    src_c = src.mean(axis=0)
-    dst_c = dst.mean(axis=0)
-    X = src - src_c
-    Y = dst - dst_c
+    mu_src = src.mean(axis=0)
+    mu_dst = dst.mean(axis=0)
+    src_c = src - mu_src
+    dst_c = dst - mu_dst
 
-    # SVD of cross-covariance
-    U, S, Vt = np.linalg.svd(X.T @ Y / len(X))
-    D_diag = np.eye(3)
-    if np.linalg.det(U @ Vt) < 0:
-        D_diag[2, 2] = -1.0
-    R = (U @ D_diag @ Vt).T
+    cov = (dst_c.T @ src_c) / n
+    U, D, Vt = np.linalg.svd(cov)
 
-    var_src = float((X * X).sum() / len(X))
-    if var_src < 1e-12:
-        raise ValueError("source points are degenerate (zero variance)")
-    s = float((S * np.diag(D_diag)).sum() / var_src)
-    t = dst_c - s * R @ src_c
+    S = np.eye(dim)
+    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
+        S[-1, -1] = -1.0
+    R = U @ S @ Vt
+
+    if with_scale:
+        var_src = (src_c ** 2).sum() / n
+        s = float((D * np.diag(S)).sum() / (var_src + _EPS))
+    else:
+        s = 1.0
+
+    t = mu_dst - s * (R @ mu_src)
     return s, R, t
+
+
+def recover_metric_scale(
+    pred_positions: np.ndarray,
+    gt_positions: np.ndarray,
+    inlier_percentile: float = 80.0,
+) -> float:
+    """Metric scale factor aligning predicted to GT camera positions.
+
+    Two-pass: fit Sim(3) on all points, keep points whose residual is below the
+    ``inlier_percentile`` percentile, then re-fit and return the scale. This
+    rejects gross trajectory outliers from imperfect structure prediction.
+
+    This implementation matches the official SANA-WM code exactly.
+
+    Args:
+        pred_positions: (N, 3) predicted camera positions
+        gt_positions: (N, 3) ground-truth camera positions
+        inlier_percentile: percentile threshold for inlier selection (default: 80.0)
+
+    Returns:
+        scale: scalar metric scale factor
+    """
+    pred = np.asarray(pred_positions, dtype=np.float64)
+    gt = np.asarray(gt_positions, dtype=np.float64)
+
+    s, R, t = umeyama_sim3(pred, gt)
+    resid = np.linalg.norm((s * (R @ pred.T)).T + t - gt, axis=1)
+    thresh = np.percentile(resid, inlier_percentile)
+    inliers = resid <= thresh
+    if inliers.sum() >= 3:  # need enough points for a stable re-fit
+        s, _, _ = umeyama_sim3(pred[inliers], gt[inliers])
+    return float(s)
 
 
 def umeyama_sim3_inlier_filter(src: np.ndarray, dst: np.ndarray,
@@ -57,6 +97,9 @@ def umeyama_sim3_inlier_filter(src: np.ndarray, dst: np.ndarray,
                                 max_iter: int = 5,
                                 ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
     """Iteratively refit Umeyama Sim(3) with percentile-based inlier rejection.
+
+    NOTE: This is an extended version with iterative refinement. For GT-pose mode
+    alignment that exactly matches the official code, use `recover_metric_scale()`.
 
     Algorithm:
       1. Fit Sim(3) on all correspondences.
